@@ -56,6 +56,13 @@ and the software fallback.
 - **Repeat and shuffle** — `Shift+L` cycles repeat off / whole playlist / this file (also
   Playback -> Repeat), `Ctrl+L` shuffles the playlist and, pressed again, restores the
   original order. Both are buttons in the playlist panel too.
+- **YouTube and friends**: paste a page URL (`Ctrl+U`, drag it in, or give it on the command
+  line) and mpv resolves it through [yt-dlp](https://github.com/yt-dlp/yt-dlp) - any site
+  yt-dlp supports, and YouTube playlists land in the playlist panel. Default quality is the
+  best stream up to 1080p; `--ytdl-format` changes that (e.g.
+  `--ytdl-format 'bestvideo[height<=?2160]+bestaudio/best'` for 4K). Needs `yt-dlp`
+  installed (`sudo dnf install yt-dlp` / `sudo apt install yt-dlp`); the player says so if
+  it is missing.
 - **Audio & subtitle track switching**, including externally-added subtitle files.
 - **Playback speed** control (0.1x - 8x), frame stepping, volume/mute.
 - **Seeking** by dragging the seek bar, or clicking anywhere on it to jump straight there.
@@ -144,6 +151,7 @@ python3 asciiplay.py movie.mkv       # open a file directly
 python3 asciiplay.py song.flac       # opens straight into the ASCII visualiser
 python3 asciiplay.py --ascii clip.mp4 --font-size 10
 python3 asciiplay.py --ascii --crt clip.mp4          # ASCII art on a CRT screen (--crt-level subtle|normal|heavy)
+python3 asciiplay.py "https://www.youtube.com/watch?v=..."   # needs yt-dlp
 python3 asciiplay.py --fullscreen movie.mkv   # start in fullscreen
 python3 asciiplay.py --fps movie.mkv          # print drawn frames/s to the terminal
 python3 asciiplay.py --renderer software x.mp4  # force the CPU path (default: auto = OpenGL, fall back)
@@ -223,7 +231,7 @@ after another app steals a file type back).
 | `Escape` | Leave fullscreen |
 | `B` | Keep seek bar visible in fullscreen: on/off |
 | `O` | Open file |
-| `Ctrl+U` | Open URL |
+| `Ctrl+U` | Open URL (direct media links, or YouTube & co via yt-dlp) |
 | `Ctrl+J` | Add subtitle file |
 | `H` / `F1` | Show all shortcuts |
 

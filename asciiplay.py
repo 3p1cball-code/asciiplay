@@ -21,6 +21,7 @@ import importlib.util
 import locale
 import math
 import os
+import shutil
 import sys
 import threading
 import time
@@ -178,6 +179,9 @@ def parse_args(argv):
                    help="mpv hwdec setting (default: auto-safe with the OpenGL renderer, auto-copy with the "
                         "software renderer; use 'no' to disable)")
     p.add_argument("--fullscreen", action="store_true", help="start in fullscreen")
+    p.add_argument("--ytdl-format", default="bestvideo[height<=?1080]+bestaudio/best",
+                   help="yt-dlp format for YouTube & co (default: best up to 1080p; e.g. 'best' or "
+                        "'bestvideo[height<=?2160]+bestaudio/best' for 4K)")
     p.add_argument("--fps", action="store_true", help="print rendered frames per second to stderr")
     p.add_argument("--renderer", choices=["auto", "gl", "software"], default="auto",
                    help="how frames get to the screen: 'gl' draws with the GPU through OpenGL (video and "
@@ -558,10 +562,18 @@ class Engine(QObject):
                 "playlist-pos", "playlist-count", "playlist", "loop-playlist", "loop-file",
                 "core-idle", "seeking"]
 
-    def __init__(self, hwdec=None, gl=True):
+    def __init__(self, hwdec=None, gl=True, ytdl_format=None):
         super().__init__()
         # Qt resets the process locale when QApplication starts; libmpv insists on LC_NUMERIC=C
         locale.setlocale(locale.LC_NUMERIC, "C")
+        # YouTube & co: mpv's ytdl hook shells out to yt-dlp (or youtube-dl) to resolve the
+        # page URL into media streams. Only switch it on when one of them is installed;
+        # the GUI tells the user what to install otherwise (see MainWindow.open_path).
+        self.ytdl_tool = shutil.which("yt-dlp") or shutil.which("youtube-dl")
+        ytdl_opts = {}
+        if self.ytdl_tool:
+            ytdl_opts = {"ytdl": True, "ytdl_format": ytdl_format or "bestvideo[height<=?1080]+bestaudio/best",
+                         "script_opts": f"ytdl_hook-ytdl_path={self.ytdl_tool}"}
         # With the GPU renderer mpv can take decoded frames straight from the hardware
         # decoder (nvdec/vaapi interop), so allow the direct methods; the software renderer
         # can only use a copy-back decoder.
@@ -569,8 +581,8 @@ class Engine(QObject):
         self.m = mpv.MPV(
             vo="libmpv", hwdec=self.hwdec, keep_open="yes", keepaspect="no",
             osc=False, input_default_bindings=False, input_vo_keyboard=False,
-            osd_level=0, audio_display="no", sub_auto="fuzzy", ytdl=False, idle="yes",
-            log_handler=self._on_log, loglevel="warn",
+            osd_level=0, audio_display="no", sub_auto="fuzzy", idle="yes",
+            log_handler=self._on_log, loglevel="warn", **(ytdl_opts or {"ytdl": False}),
         )
         # Transparent pixels (a webm/apng with alpha): mpv's default is a grey checkerboard
         # behind them, which the ASCII filter turns into a wall of grey glyphs. Plain black
@@ -1877,7 +1889,7 @@ class MainWindow(QMainWindow):
         self.use_gl = HAVE_GL and args.renderer != "software"
         if args.renderer == "gl" and not HAVE_GL:
             raise RuntimeError("--renderer gl: PyQt6's QtOpenGL/QtOpenGLWidgets modules are not installed")
-        self.engine = Engine(hwdec=args.hwdec, gl=self.use_gl)
+        self.engine = Engine(hwdec=args.hwdec, gl=self.use_gl, ytdl_format=args.ytdl_format)
         family = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
         self.ascii = AsciiRenderer(family, font_px=args.font_size)
         self.video = self._make_video_widget()
@@ -2312,7 +2324,16 @@ class MainWindow(QMainWindow):
     def open_path(self, path, append=False):
         """Open a local file (media or subtitle) or a URL."""
         if path.startswith(("http://", "https://", "rtsp://", "rtmp://", "ftp://")):
+            host = QUrl(path).host().lower()
+            direct = path.lower().rsplit("?", 1)[0].endswith(
+                (".mp4", ".mkv", ".webm", ".mp3", ".flac", ".ogg", ".opus", ".wav", ".m4a", ".aac", ".m3u8", ".ts"))
+            if not direct and not self.engine.ytdl_tool and path.startswith("http"):
+                self.video.flash("playing sites like YouTube needs yt-dlp - install it (e.g. sudo dnf install yt-dlp) "
+                                 "and start asciiplay again", 8)
+                return
             self._load_media(path, append)
+            if not direct and self.engine.ytdl_tool:
+                self.video.flash(f"resolving {host or 'URL'} with yt-dlp…", 6)
             return
         if path.startswith("file://"):
             # a desktop launcher ("Open With", double-click, %U in a .desktop Exec=) hands
