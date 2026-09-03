@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=asciiplay
+GenericName=Video/Audio Player
+Comment=Terminal-style video/audio player with an ASCII art filter
+Exec=__EXEC__ %U
+Icon=asciiplay
+Terminal=false
+Categories=AudioVideo;Player;Qt;
+StartupWMClass=asciiplay
+StartupNotify=true
+MimeType=video/mp4;video/x-matroska;video/webm;video/x-msvideo;video/quicktime;video/mpeg;video/x-flv;video/x-ms-wmv;video/ogg;video/3gpp;video/mp2t;audio/mpeg;audio/flac;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/x-wav;audio/mp4;audio/x-ms-wma;audio/x-aiff;audio/x-ape;
+Keywords=video;audio;player;ascii;terminal;mpv;
