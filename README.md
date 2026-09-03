@@ -1,8 +1,39 @@
 # asciiplay
 
-A small, native (no browser) video/audio player for the desktop, in the spirit of a
-terminal video player: it can render video as coloured ASCII art, and it always shows
-an ASCII visualiser for audio-only files.
+**A native video and audio player with a terminal soul.** Anything it plays can be turned
+into live, coloured ASCII art, rendered by a fragment shader on the GPU so it keeps the
+video's frame rate even fullscreen at 5120x1440, and that picture can be put behind the
+glass of a simulated CRT monitor: curved tube, shadow mask, scanlines, bloom, grain and
+phosphor afterglow. Audio files play through the same path as one of five ffmpeg
+visualisers. Around that sits an ordinary, complete player built on libmpv: hardware
+decoding, audio and subtitle tracks, crop presets, speed, frame stepping, screenshots,
+text export, a playlist with repeat and shuffle, drag and drop, desktop integration.
+
+Single file, Python, no browser, no Electron: `asciiplay.py` on top of libmpv, PyQt6 and numpy.
+
+<p align="center">
+  <img src="screenshots/crt_amber_blocks.jpg" width="49%" alt="amber phosphor, block characters, CRT screen">
+  <img src="screenshots/crt_normal.jpg" width="49%" alt="full colour ASCII on the CRT screen">
+</p>
+<p align="center">
+  <img src="screenshots/ascii_color.jpg" width="49%" alt="full colour ASCII, classic 70-character ramp">
+  <img src="screenshots/crt_green.jpg" width="49%" alt="green phosphor on the CRT screen">
+</p>
+<p align="center">
+  <img src="screenshots/window.jpg" width="98%" alt="the player window with the playlist panel">
+</p>
+<p align="center"><sub>Frames from deadmau5 - Quezacotl (live show visualizer); the
+<a href="screenshots/original.jpg">original frame</a> for comparison. Screenshots are the
+player's own Ctrl+C output, downscaled to JPG.</sub></p>
+
+## Why this exists
+
+There are many ASCII video players, and they all live in a terminal: decoded on the CPU,
+limited to the terminal's cell grid, mostly without sound, tracks or a real UI. There are
+CRT shaders for emulators and video players, and browser toys that put ASCII and
+scanlines on a clip you upload. asciiplay is, as far as I can tell, the only one that
+puts the whole thing together in one desktop player - ASCII conversion and the CRT look
+as GPU shader passes inside a real window, on top of an actual media player.
 
 Single file: `asciiplay.py`. Built on [libmpv](https://mpv.io/) for decoding/tracks/speed,
 [PyQt6](https://pypi.org/project/PyQt6/) for the window, OpenGL for putting frames on the

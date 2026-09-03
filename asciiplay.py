@@ -27,7 +27,7 @@ import time
 
 APP_NAME = "asciiplay"
 VERSION = "1.1"
-HOMEPAGE = ""   # filled in once the project has a public home (shown in the About dialog)
+HOMEPAGE = "https://github.com/3p1cball-code/asciiplay"
 
 # --------------------------------------------------------------------------------------
 # Dependency check (runs before any third-party import)
