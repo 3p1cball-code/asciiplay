@@ -27,7 +27,7 @@ import threading
 import time
 
 APP_NAME = "asciiplay"
-VERSION = "1.1"
+VERSION = "1.2"
 HOMEPAGE = "https://github.com/3p1cball-code/asciiplay"
 
 # --------------------------------------------------------------------------------------
@@ -170,7 +170,13 @@ def parse_args(argv):
     p.add_argument("files", nargs="*", help="media files, subtitle files or URLs to open")
     p.add_argument("--check", action="store_true", help="only check dependencies and exit")
     p.add_argument("--ascii", action="store_true", help="start with the ASCII filter enabled")
+    p.add_argument("--filter", choices=["off", "ascii", "bayer2", "bayer4", "bayer8", "vector"], default=None,
+                   help="start with this display filter on: ASCII art, Bayer 1-bit dithering (2x2, 4x4 or 8x8 "
+                        "matrix) or the vector display (default: off, or ascii with --ascii)")
     p.add_argument("--font-size", type=int, default=12, help="ASCII cell font size in pixels (default 12)")
+    p.add_argument("--pixel-size", type=int, default=2,
+                   help="size of one dither/vector pixel in screen pixels for the Bayer and vector filters "
+                        "(default 2; the resolution divider multiplies it)")
     p.add_argument("--crt", action="store_true",
                    help="start with the CRT screen filter on (shows on top of the ASCII art; OpenGL renderer only)")
     p.add_argument("--crt-level", choices=["subtle", "normal", "heavy"], default="normal",
@@ -182,6 +188,17 @@ def parse_args(argv):
     p.add_argument("--ytdl-format", default="bestvideo[height<=?1080]+bestaudio/best",
                    help="yt-dlp format for YouTube & co (default: best up to 1080p; e.g. 'best' or "
                         "'bestvideo[height<=?2160]+bestaudio/best' for 4K)")
+    p.add_argument("--ytdl-cookies-from-browser", metavar="BROWSER", default=None,
+                   help="let yt-dlp use your browser's cookies (firefox, chrome, chromium, brave, edge, "
+                        "opera, vivaldi, safari; a profile can follow, e.g. 'firefox:default'). This is the "
+                        "cure when YouTube answers 'Sign in to confirm you are not a bot'")
+    p.add_argument("--ytdl-client", metavar="CLIENT", default=None,
+                   help="which YouTube player client yt-dlp should pretend to be (e.g. android_vr, tv, web, "
+                        "ios; several separated by commas). Another thing to try against the bot check, and "
+                        "it needs no cookies - but which client works changes over time")
+    p.add_argument("--ytdl-raw-options", metavar="K=V,...", default=None,
+                   help="anything else to hand yt-dlp, in mpv's --ytdl-raw-options syntax (added after the "
+                        "two options above)")
     p.add_argument("--fps", action="store_true", help="print rendered frames per second to stderr")
     p.add_argument("--renderer", choices=["auto", "gl", "software"], default="auto",
                    help="how frames get to the screen: 'gl' draws with the GPU through OpenGL (video and "
@@ -225,6 +242,41 @@ try:
 except ImportError:  # pragma: no cover
     HAVE_GL = False
 
+# Where each browser yt-dlp can read cookies from keeps its profile, so the hint below can
+# name one the user actually has rather than a guess.
+BROWSER_DIRS = {
+    "firefox": ("~/.mozilla/firefox", "~/snap/firefox/common/.mozilla/firefox",
+                "~/.var/app/org.mozilla.firefox/.mozilla/firefox"),
+    "chrome": ("~/.config/google-chrome",),
+    "chromium": ("~/.config/chromium", "~/snap/chromium/common/chromium",
+                 "~/.var/app/org.chromium.Chromium/config/chromium"),
+    "brave": ("~/.config/BraveSoftware/Brave-Browser",),
+    "edge": ("~/.config/microsoft-edge",),
+    "vivaldi": ("~/.config/vivaldi",),
+    "opera": ("~/.config/opera",),
+}
+
+
+def installed_browsers():
+    """The browsers yt-dlp could take cookies from on this machine, best guess by profile dir."""
+    return [name for name, dirs in BROWSER_DIRS.items()
+            if any(os.path.isdir(os.path.expanduser(d)) for d in dirs)]
+
+
+def ytdl_bot_hint():
+    """YouTube sometimes refuses to hand yt-dlp a stream unless the request looks like a
+    signed-in browser ("Sign in to confirm you're not a bot"). Nothing in the player can fix
+    that - it is an anti-bot check on YouTube's side, keyed to the IP address and how many
+    requests have come from it - so say what actually helps instead of the raw error."""
+    found = installed_browsers()
+    browser = found[0] if found else "firefox"
+    others = "  (or: " + ", ".join(found[1:5]) + ")" if len(found) > 1 else ""
+    return ("YouTube asked yt-dlp to \"confirm you're not a bot\".\n"
+            "That is YouTube blocking this connection, not a problem with the file.\n"
+            f"Start asciiplay with   --ytdl-cookies-from-browser {browser}{others}\n"
+            "to let yt-dlp use your browser's YouTube login, or try\n"
+            "  --ytdl-client android_vr   which needs no cookies.\n"
+            "Waiting a few minutes often clears it by itself.")
 SUB_EXT = {".srt", ".ass", ".ssa", ".sub", ".vtt", ".sup", ".idx", ".lrc", ".txt", ".smi", ".mks"}
 MEDIA_FILTER = ("Media files (*.mp4 *.mkv *.webm *.avi *.mov *.m4v *.mpg *.mpeg *.ts *.flv *.wmv *.ogv "
                 "*.mp3 *.flac *.ogg *.oga *.opus *.wav *.m4a *.aac *.wma *.aiff *.ape);;All files (*)")
@@ -243,7 +295,55 @@ CHAR_RAMPS = {
     "detailed": " `,Ii~-[1|truzULOwdh*W%$",
     "classic": " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$",
 }
-COLOR_MODES = ["color", "raw", "green", "amber", "mono"]
+# Colour modes cycled with `e`. The first five tint the picture directly (full colour,
+# the raw video colour, and three CRT phosphors); the `pal*` modes snap every colour to a
+# fixed retro palette (see PALETTES). All of them apply to every display filter.
+COLOR_MODES = ["color", "raw", "green", "amber", "mono", "pal8", "pal16", "pal32"]
+COLOR_MODE_LABELS = {"color": "colour", "raw": "raw", "green": "green phosphor", "amber": "amber phosphor",
+                     "mono": "mono phosphor", "pal8": "8 colours (RGB)", "pal16": "16 colours (CGA)",
+                     "pal32": "32 colours (DB32)"}
+# Quantised palettes for the pal* colour modes: (dither spread, RGB colours). The spread
+# is how far the Bayer matrix pushes a colour before it snaps to the nearest entry - a
+# sparser palette needs a wider spread to produce a visible dither pattern between two
+# neighbouring colours instead of flat areas.
+#   pal8   the 3-bit RGB set of the ZX Spectrum / BBC Micro / Teletext era
+#   pal16  the 16 CGA/EGA text-mode colours every PC once had
+#   pal32  DawnBringer's DB32, a general-purpose 32-colour pixel-art palette
+PALETTES = {
+    "pal8": (0.50, [(0, 0, 0), (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255),
+                    (0, 255, 255), (255, 255, 255)]),
+    "pal16": (0.35, [(0, 0, 0), (0, 0, 170), (0, 170, 0), (0, 170, 170), (170, 0, 0), (170, 0, 170),
+                     (170, 85, 0), (170, 170, 170), (85, 85, 85), (85, 85, 255), (85, 255, 85),
+                     (85, 255, 255), (255, 85, 85), (255, 85, 255), (255, 255, 85), (255, 255, 255)]),
+    "pal32": (0.25, [(0, 0, 0), (34, 32, 52), (69, 40, 60), (102, 57, 49), (143, 86, 59), (223, 113, 38),
+                     (217, 160, 102), (238, 195, 154), (251, 242, 54), (153, 229, 80), (106, 190, 48),
+                     (55, 148, 110), (75, 105, 47), (82, 75, 36), (50, 60, 57), (63, 63, 116),
+                     (48, 96, 130), (91, 110, 225), (99, 155, 255), (95, 205, 228), (203, 219, 252),
+                     (255, 255, 255), (155, 173, 183), (132, 126, 135), (105, 106, 106), (89, 86, 82),
+                     (118, 66, 138), (172, 50, 50), (217, 87, 99), (215, 123, 186), (143, 151, 74),
+                     (138, 111, 48)]),
+}
+# Display filters cycled with `t` (off -> each of these -> off). `ascii` is the ASCII art
+# renderer; the `bayer*` filters are 1-bit ordered dithering with a 2x2, 4x4 or 8x8 Bayer
+# matrix (the classic Mac/Atari ST/Amiga 1-bit look, in colour variants via `e`); `vector`
+# runs an edge detector over the picture and draws the edges as glowing beam traces, like
+# a vector monitor (Vectrex, Asteroids, Tempest). The Bayer and vector filters work on a
+# grid of "pixels" rather than character cells: PIXEL size = --pixel-size (Ctrl+-/=)
+# times the resolution divider (`d`), in screen pixels.
+FILTERS = [("ascii", "ASCII art"), ("bayer2", "Bayer 2×2"), ("bayer4", "Bayer 4×4"), ("bayer8", "Bayer 8×8"),
+           ("vector", "vector display")]
+FILTER_NAMES = [name for name, _ in FILTERS]
+FILTER_LABELS = dict(FILTERS)
+# What the filter button and its dropdown say - kept short so the control bar does not
+# get any wider than it was before the Bayer and vector filters existed.
+FILTER_SHORT = {"ascii": "ascii", "bayer2": "bayer 2×2", "bayer4": "bayer 4×4", "bayer8": "bayer 8×8",
+                "vector": "vector"}
+FILTER_BUTTON = {"ascii": "ASCII", "bayer2": "BAYER", "bayer4": "BAYER", "bayer8": "BAYER", "vector": "VECTOR"}
+BAYER_ORDER = {"bayer2": 1, "bayer4": 2, "bayer8": 3}     # matrix side = 2 ** order
+# Vector display: Sobel edge magnitude below `lo` is dropped, above `hi` is a full-strength
+# beam; `glow` is how much of the blurred beam is added back as halo (without the CRT filter
+# that halo is all the glow there is).
+VECTOR_EDGE_LO, VECTOR_EDGE_HI, VECTOR_GLOW = 0.06, 0.30, 1.2
 # Crop presets cycled with `c` (like VLC): each is a target *display* aspect ratio (w/h).
 # The picture is centre-cropped to that ratio, trimming baked-in black bars - top/bottom
 # when the target is wider than the source, left/right when it is narrower. "off" clears
@@ -354,8 +454,10 @@ uniform vec2 u_grid;          // cols, rows (float: PyQt6 cannot set an ivec2 un
 uniform float u_fbh;          // framebuffer height (gl_FragCoord counts from the bottom)
 uniform float u_nchars;
 uniform float u_gamma;
-uniform int u_mode;           // 0 colour, 1 raw, 2 phosphor
+uniform int u_mode;           // 0 colour, 1 raw, 2 phosphor, 3 palette
 uniform vec3 u_phosphor;      // tube colour for mode 2 (RGB, 0..1)
+uniform int u_pal_off;        // palette for mode 3: first entry in PAL, and how many
+uniform int u_pal_n;
 out vec4 fragColor;
 void main() {
     vec2 p = vec2(gl_FragCoord.x, u_fbh - gl_FragCoord.y) - u_origin;
@@ -373,10 +475,11 @@ void main() {
     f.x = clamp(f.x, 0.5 / u_glyph.x, 1.0 - 0.5 / u_glyph.x);
     float mask = texture(u_atlas, vec2((idx + f.x) / u_nchars, f.y)).r;
     vec3 col;
-    if (u_mode == 0) {
+    if (u_mode == 0 || u_mode == 3) {
         float mx = max(max(c.r, c.g), c.b);
         vec3 norm = mx > 0.0 ? c / mx : vec3(0.0);
         col = (c * 2.0 + norm * 3.0) / 5.0;
+        if (u_mode == 3) col = nearest_pal(col, u_pal_off, u_pal_n);
     } else if (u_mode == 1) {
         col = c;
     } else {
@@ -386,6 +489,165 @@ void main() {
         col = glow * (1.0 - hot) + hot;
     }
     fragColor = vec4(mask * col, 1.0);
+}
+"""
+
+
+def _glsl_common():
+    """GLSL shared by the display-filter shaders: the palettes as one constant table
+    (PAL_OFFSETS says where each starts), nearest-colour lookup, and the Bayer matrix."""
+    entries, offsets = [], {}
+    for name, (_spread, colours) in PALETTES.items():
+        offsets[name] = len(entries)
+        entries.extend(colours)
+    table = ", ".join(f"vec3({r / 255:.4f}, {g / 255:.4f}, {b / 255:.4f})" for r, g, b in entries)
+    code = f"const vec3 PAL[{len(entries)}] = vec3[{len(entries)}]({table});\n" + """
+vec3 nearest_pal(vec3 c, int off, int n) {
+    vec3 best = PAL[off];
+    float bd = 1e9;
+    for (int i = 0; i < 32; ++i) {
+        if (i >= n) break;
+        vec3 q = PAL[off + i];
+        vec3 d = (c - q) * vec3(0.9, 1.1, 0.8);   // the eye weighs green most, blue least
+        float dd = dot(d, d);
+        if (dd < bd) { bd = dd; best = q; }
+    }
+    return best;
+}
+// Threshold of the 2^k x 2^k Bayer matrix at integer position p, in (0, 1): the matrix
+// is built by bit-interleaving (x xor y) and y, finest bit first, which is the same
+// recursive matrix AsciiRenderer.bayer_matrix() builds on the CPU.
+float bayer(ivec2 p, int k) {
+    int v = 0;
+    int x = p.x;
+    int y = p.y;
+    for (int i = 0; i < k; ++i) {
+        v = (v << 2) | (((x ^ y) & 1) << 1) | (y & 1);
+        x >>= 1;
+        y >>= 1;
+    }
+    return (float(v) + 0.5) / float(1 << (2 * k));
+}
+"""
+    return code, offsets
+
+
+GLSL_COMMON, PAL_OFFSETS = _glsl_common()
+
+# Bayer 1-bit dithering (FILTERS bayer2/4/8): mpv renders one pixel per dither pixel into
+# the small framebuffer, exactly like the ASCII path, and this shader thresholds each of
+# them against the Bayer matrix. Colour modes: colour = one bit per channel (8 colours),
+# raw = plain black and white, phosphor = black and the tube colour, palette = the
+# dithered colour snapped to the nearest palette entry.
+BAYER_FRAG = """
+uniform sampler2D u_frame;    // mpv's render: one pixel per dither pixel, row 0 = top
+uniform vec2 u_origin;
+uniform vec2 u_cell;          // size of one dither pixel on screen, framebuffer pixels
+uniform vec2 u_grid;          // cols, rows
+uniform float u_fbh;
+uniform float u_gamma;
+uniform int u_mode;           // 0 rgb, 1 black/white, 2 phosphor, 3 palette
+uniform vec3 u_phosphor;
+uniform int u_order;          // 1, 2, 3 -> 2x2, 4x4, 8x8 matrix
+uniform float u_spread;
+uniform int u_pal_off;
+uniform int u_pal_n;
+out vec4 fragColor;
+void main() {
+    vec2 p = vec2(gl_FragCoord.x, u_fbh - gl_FragCoord.y) - u_origin;
+    vec2 cf = p / u_cell;
+    if (any(lessThan(cf, vec2(0.0))) || any(greaterThanEqual(cf, u_grid))) {
+        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    ivec2 cell = ivec2(floor(cf));
+    vec3 c = texelFetch(u_frame, cell, 0).rgb;
+    float t = bayer(cell, u_order);
+    vec3 col;
+    if (u_mode == 0) {
+        col = step(vec3(t), pow(c, vec3(u_gamma)));
+    } else if (u_mode == 3) {
+        col = nearest_pal(clamp(c + (t - 0.5) * u_spread, 0.0, 1.0), u_pal_off, u_pal_n);
+    } else {
+        float lum = pow(dot(c, vec3(77.0, 151.0, 28.0) / 256.0), u_gamma);
+        col = (u_mode == 1 ? vec3(1.0) : u_phosphor) * step(t, lum);
+    }
+    fragColor = vec4(col, 1.0);
+}
+"""
+
+# Vector display (FILTERS vector), two passes. VECTOR_EDGE_FRAG runs a Sobel edge detector
+# over mpv's small render (one texel per pixel of the vector grid) and writes the beam
+# colour times the edge strength (alpha = strength) into a same-sized framebuffer;
+# VECTOR_FRAG then draws that on screen, bilinearly upscaled so the traces are smooth
+# lines, with a white-hot core and a soft halo like the beam of a vector monitor. Colour
+# modes: phosphor = the tube colour, colour = the picture's own hue at full beam brightness
+# (a colour vector monitor like Tempest's), raw = a dimmer version of that, palette =
+# that hue snapped to the palette.
+VECTOR_EDGE_FRAG = """
+uniform sampler2D u_frame;
+uniform vec2 u_grid;
+uniform int u_mode;           // 0 colour, 1 raw, 2 phosphor, 3 palette
+uniform vec3 u_phosphor;
+uniform int u_pal_off;
+uniform int u_pal_n;
+uniform float u_lo;
+uniform float u_hi;
+out vec4 fragColor;
+float L(ivec2 p) {
+    p = clamp(p, ivec2(0), ivec2(u_grid) - 1);
+    return dot(texelFetch(u_frame, p, 0).rgb, vec3(0.299, 0.587, 0.114));
+}
+void main() {
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    float gx = (L(p + ivec2(1, -1)) + 2.0 * L(p + ivec2(1, 0)) + L(p + ivec2(1, 1)))
+             - (L(p + ivec2(-1, -1)) + 2.0 * L(p + ivec2(-1, 0)) + L(p + ivec2(-1, 1)));
+    float gy = (L(p + ivec2(-1, 1)) + 2.0 * L(p + ivec2(0, 1)) + L(p + ivec2(1, 1)))
+             - (L(p + ivec2(-1, -1)) + 2.0 * L(p + ivec2(0, -1)) + L(p + ivec2(1, -1)));
+    float e = smoothstep(u_lo, u_hi, length(vec2(gx, gy)) * 0.25);
+    vec3 c = texelFetch(u_frame, clamp(p, ivec2(0), ivec2(u_grid) - 1), 0).rgb;
+    vec3 tint;
+    if (u_mode == 2) {
+        tint = u_phosphor;
+    } else {
+        float mx = max(max(c.r, c.g), c.b);
+        vec3 norm = mx > 0.02 ? c / mx : vec3(1.0);
+        if (u_mode == 0) tint = norm;
+        else if (u_mode == 1) tint = mix(norm, c, 0.5);
+        else tint = nearest_pal(norm, u_pal_off, u_pal_n);
+    }
+    fragColor = vec4(tint * e, e);
+}
+"""
+VECTOR_FRAG = """
+uniform sampler2D u_edge;     // beam traces at grid resolution (rgb = colour * strength, a = strength)
+uniform vec2 u_origin;
+uniform vec2 u_cell;          // size of one grid pixel on screen, framebuffer pixels
+uniform vec2 u_grid;
+uniform float u_fbh;
+uniform float u_glow;
+out vec4 fragColor;
+void main() {
+    vec2 p = vec2(gl_FragCoord.x, u_fbh - gl_FragCoord.y) - u_origin;
+    vec2 cf = p / u_cell;
+    if (any(lessThan(cf, vec2(0.0))) || any(greaterThanEqual(cf, u_grid))) {
+        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    vec2 uv = cf / u_grid;
+    vec2 tx = 1.0 / u_grid;
+    vec4 line = texture(u_edge, uv);
+    vec3 glow = vec3(0.0);
+    float wsum = 0.0;
+    for (int j = -2; j <= 2; ++j) {
+        for (int i = -2; i <= 2; ++i) {
+            float w = exp(-0.4 * float(i * i + j * j));
+            glow += texture(u_edge, uv + vec2(float(i), float(j)) * tx).rgb * w;
+            wsum += w;
+        }
+    }
+    vec3 col = line.rgb * 1.1 + vec3(0.35 * line.a * line.a) + glow / wsum * u_glow;
+    fragColor = vec4(min(col, vec3(1.0)), 1.0);
 }
 """
 
@@ -562,7 +824,22 @@ class Engine(QObject):
                 "playlist-pos", "playlist-count", "playlist", "loop-playlist", "loop-file",
                 "core-idle", "seeking"]
 
-    def __init__(self, hwdec=None, gl=True, ytdl_format=None):
+    @staticmethod
+    def ytdl_raw_options(cookies_from_browser=None, client=None, extra=None):
+        """mpv's --ytdl-raw-options value (a key=value list) for the yt-dlp knobs we expose,
+        or None if there is nothing to pass. Entries are comma separated, so a value that
+        contains a comma itself - `--ytdl-client android_vr,tv` - is given with mpv's
+        length-prefixed quoting (`key=%12%some,value`) instead."""
+        parts = []
+        for key, value in (("cookies-from-browser", cookies_from_browser),
+                           ("extractor-args", f"youtube:player_client={client}" if client else None)):
+            if value:
+                parts.append(f"{key}=%{len(value)}%{value}" if "," in value else f"{key}={value}")
+        if extra:
+            parts.append(extra)
+        return ",".join(parts) or None
+
+    def __init__(self, hwdec=None, gl=True, ytdl_format=None, ytdl_raw=None):
         super().__init__()
         # Qt resets the process locale when QApplication starts; libmpv insists on LC_NUMERIC=C
         locale.setlocale(locale.LC_NUMERIC, "C")
@@ -574,6 +851,8 @@ class Engine(QObject):
         if self.ytdl_tool:
             ytdl_opts = {"ytdl": True, "ytdl_format": ytdl_format or "bestvideo[height<=?1080]+bestaudio/best",
                          "script_opts": f"ytdl_hook-ytdl_path={self.ytdl_tool}"}
+            if ytdl_raw:
+                ytdl_opts["ytdl_raw_options"] = ytdl_raw
         # With the GPU renderer mpv can take decoded frames straight from the hardware
         # decoder (nvdec/vaapi interop), so allow the direct methods; the software renderer
         # can only use a copy-back decoder.
@@ -821,10 +1100,19 @@ class AsciiRenderer:
         # the display area. Applies to audio files too since they render through this same
         # path via the ASCII visualiser.
         self.res_divider = 1
+        # Which display filter is drawn while the filter is on (see FILTERS); the on/off
+        # state itself lives on the video widget. The Bayer and vector filters work on a
+        # pixel grid instead of character cells: one grid pixel is pixel_px * res_divider
+        # screen pixels.
+        self.filter = "ascii"
+        self.pixel_px = 2
         # CRT screen filter on top of the ASCII picture (GL renderer only; see CRT_LEVELS).
         # Kept here with the other ASCII settings so it survives a renderer swap.
         self.crt_on = False
         self.crt_level = 1
+        self._pal_cache = {}
+        self._pix_key = None
+        self._pix_out = self._bayer_t = None
         self._ensure_atlas()
 
     # ---- glyph atlas ----
@@ -897,6 +1185,66 @@ class AsciiRenderer:
         d = self.res_divider
         return max(1, width_px // (self.cell_w * d)), max(1, height_px // (self.cell_h * d))
 
+    # ---- pixel grid (Bayer / vector filters) ----
+    def set_pixel_px(self, px):
+        self.pixel_px = max(1, min(16, int(px)))
+
+    def pixel_size(self):
+        """Side of one dither/vector grid pixel in (logical) screen pixels."""
+        return self.pixel_px * self.res_divider
+
+    def pixel_grid(self, width_px, height_px):
+        """Number of grid pixels that fit in the area for the Bayer and vector filters."""
+        s = self.pixel_size()
+        return max(1, width_px // s), max(1, height_px // s)
+
+    @property
+    def is_ascii(self):
+        return self.filter == "ascii"
+
+    # ---- palettes ----
+    def palette_bgr(self, mode):
+        """The pal* colour mode's colours as a (n, 3) float32 array, BGR, 0..1."""
+        if mode not in self._pal_cache:
+            cols = np.array(PALETTES[mode][1], np.float32)[:, ::-1] / 255.0
+            self._pal_cache[mode] = np.ascontiguousarray(cols)
+        return self._pal_cache[mode]
+
+    def nearest_palette(self, col, mode):
+        """col: (..., 3) float32 BGR 0..1 -> the nearest palette colour per pixel, same shape
+        and range. The CPU twin of nearest_pal() in the shaders (same channel weights)."""
+        pal = self.palette_bgr(mode)
+        w = np.array([0.8, 1.1, 0.9], np.float32)          # BGR order of the shader's RGB weights
+        best = np.full(col.shape[:-1], np.inf, np.float32)
+        idx = np.zeros(col.shape[:-1], np.intp)
+        for i, q in enumerate(pal):
+            d = (((col - q) * w) ** 2).sum(axis=-1)
+            closer = d < best
+            best[closer] = d[closer]
+            idx[closer] = i
+        return pal[idx]
+
+    @staticmethod
+    def bayer_matrix(order):
+        """Thresholds of the 2^order square Bayer matrix, in (0, 1), row-major (y, x)."""
+        m = np.array([[0, 2], [3, 1]], np.int32)
+        for _ in range(order - 1):
+            m = np.block([[4 * m, 4 * m + 2], [4 * m + 3, 4 * m + 1]])
+        n = m.shape[0]
+        return (m.astype(np.float32) + 0.5) / float(n * n)
+
+    def _ensure_pix_bufs(self, rows, cols, order):
+        key = (rows, cols, order)
+        if key == self._pix_key:
+            return
+        self._pix_out = np.empty((rows, cols, 4), np.uint8)
+        self._pix_out[..., 3] = 0
+        if order:
+            m = self.bayer_matrix(order)
+            n = m.shape[0]
+            self._bayer_t = m[np.arange(rows)[:, None] % n, np.arange(cols)[None, :] % n]
+        self._pix_key = key
+
     def _ensure_bufs(self, rows, cols):
         key = (rows, cols, self.cell_w, self.cell_h)
         if key == self._buf_key:
@@ -928,6 +1276,13 @@ class AsciiRenderer:
             col = (small * 2 + norm * 3) // 5
         elif mode == "raw":
             col = small
+        elif mode in PALETTES:
+            # palette: the "colour" mode's tint snapped to the nearest palette entry
+            mx = small.max(axis=2, keepdims=True)
+            mx[mx == 0] = 1
+            norm = (small.astype(np.uint32) * 255 // mx).astype(np.uint16)
+            tint = ((small * 2 + norm * 3) // 5).astype(np.float32) * (1.0 / 255.0)
+            col = (self.nearest_palette(tint, mode) * 255.0 + 0.5).astype(np.uint16)
         else:
             # CRT phosphor look: the tube colour glows through the midtones, highlights
             # bloom brighter, and the very brightest pixels desaturate towards near-white,
@@ -940,6 +1295,66 @@ class AsciiRenderer:
             col = (glow * (1.0 - hot) + 255.0 * hot).astype(np.uint16)
         self.last_chars, self.last_colors = idx, col
         return idx, col
+
+    def bayer_convert(self, frame):
+        """Bayer 1-bit dithering on the CPU: frame (rows, cols, 4) BGRX uint8, one pixel per
+        grid pixel -> (rows, cols, 4) BGRX uint8 of the same size (to be scaled up with
+        nearest-neighbour filtering). The CPU twin of BAYER_FRAG - keep the two in sync.
+        Returns a buffer owned by this renderer and reused on the next call."""
+        rows, cols = frame.shape[0], frame.shape[1]
+        order = BAYER_ORDER[self.filter]
+        self._ensure_pix_bufs(rows, cols, order)
+        t, out = self._bayer_t, self._pix_out
+        c = frame[..., :3].astype(np.float32) * (1.0 / 255.0)     # BGR 0..1
+        mode = self.color_mode
+        if mode == "color":
+            out[..., :3] = (np.power(c, self.gamma) > t[..., None]) * np.uint8(255)
+        elif mode in PALETTES:
+            spread = PALETTES[mode][0]
+            q = np.clip(c + (t[..., None] - 0.5) * spread, 0.0, 1.0)
+            out[..., :3] = (self.nearest_palette(q, mode) * 255.0 + 0.5).astype(np.uint8)
+        else:
+            lum = np.power((c[..., 2] * 77.0 + c[..., 1] * 151.0 + c[..., 0] * 28.0) / 256.0, self.gamma)
+            colour = np.array((255, 255, 255) if mode == "raw" else PHOSPHOR[mode], np.uint8)
+            out[..., :3] = (lum > t)[..., None] * colour
+        return out
+
+    def vector_convert(self, frame):
+        """Vector display on the CPU: Sobel edges of the small frame drawn as glowing beam
+        traces, (rows, cols, 4) BGRX uint8 at grid resolution (to be scaled up smoothly).
+        The CPU twin of VECTOR_EDGE_FRAG + VECTOR_FRAG - keep them in sync."""
+        rows, cols = frame.shape[0], frame.shape[1]
+        self._ensure_pix_bufs(rows, cols, 0)
+        out = self._pix_out
+        c = frame[..., :3].astype(np.float32) * (1.0 / 255.0)     # BGR 0..1
+        lum = c[..., 2] * 0.299 + c[..., 1] * 0.587 + c[..., 0] * 0.114
+        lp = np.pad(lum, 1, mode="edge")
+        gx = ((lp[:-2, 2:] + 2.0 * lp[1:-1, 2:] + lp[2:, 2:])
+              - (lp[:-2, :-2] + 2.0 * lp[1:-1, :-2] + lp[2:, :-2]))
+        gy = ((lp[2:, :-2] + 2.0 * lp[2:, 1:-1] + lp[2:, 2:])
+              - (lp[:-2, :-2] + 2.0 * lp[:-2, 1:-1] + lp[:-2, 2:]))
+        e = np.clip((np.hypot(gx, gy) * 0.25 - VECTOR_EDGE_LO) / (VECTOR_EDGE_HI - VECTOR_EDGE_LO), 0.0, 1.0)
+        e = e * e * (3.0 - 2.0 * e)                                 # smoothstep
+        mode = self.color_mode
+        if mode in PHOSPHOR:
+            tint = np.array(PHOSPHOR[mode], np.float32) / 255.0
+            line = e[..., None] * tint
+        else:
+            mx = c.max(axis=2, keepdims=True)
+            norm = np.where(mx > 0.02, c / np.maximum(mx, 1e-6), 1.0).astype(np.float32)
+            if mode == "raw":
+                norm = (norm + c) * 0.5
+            elif mode in PALETTES:
+                norm = self.nearest_palette(norm, mode)
+            line = e[..., None] * norm
+        # halo: a small separable blur of the traces (the shader uses a 5x5 gaussian)
+        k = np.array([1.0, 4.0, 6.0, 4.0, 1.0], np.float32) / 16.0
+        pad = np.pad(line, ((2, 2), (2, 2), (0, 0)), mode="constant")
+        h = sum(k[i] * pad[:, i:i + cols] for i in range(5))
+        glow = sum(k[i] * h[i:i + rows] for i in range(5))
+        pic = line * 1.1 + (0.35 * e * e)[..., None] + glow * VECTOR_GLOW
+        out[..., :3] = (np.clip(pic, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+        return out
 
     def convert(self, frame):
         """frame: (rows, cols, 4) BGRX uint8, one pixel per cell -> (rows*cell_h, cols*cell_w, 4) BGRX uint8.
@@ -1058,7 +1473,8 @@ class VideoWidgetBase:
         now = time.monotonic()
         if now - self._fps_t >= 1.0:
             print(f"[fps] {self._fps_n / (now - self._fps_t):.1f} frames/s drawn  ({self.width()}x{self.height()}"
-                  f"{', ascii' if self.ascii_active else ''}{'+crt' if self.crt_active else ''})", file=sys.stderr)
+                  f"{', ' + self.ascii.filter if self.ascii_active else ''}{'+crt' if self.crt_active else ''})",
+                  file=sys.stderr)
             self._fps_n, self._fps_t = 0, now
 
     # ---- overlays ----
@@ -1104,7 +1520,7 @@ class VideoWidgetBase:
             "│  drop a video, audio or subtitle file     │",
             "│  or press  o  to open one                 │",
             "│                                           │",
-            "│  t  ascii  g  crt  e  colour  c  crop     │",
+            "│  t  filter g  crt  e  colour  c  crop     │",
             "│  [ ]  speed          a / j  audio / subs  │",
             "│  l  playlist         f  fullscreen        │",
             "│  h  all shortcuts                         │",
@@ -1185,6 +1601,7 @@ class SoftwareVideoWidget(VideoWidgetBase, QWidget):
         self._image_buf = None
         self._image_pos = QPoint(0, 0)
         self._image_target_size = None  # set when the resolution divider > 1: stretch to this size
+        self._image_smooth = True       # ... with smooth filtering (False: nearest, for the Bayer pixels)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         # a full re-render per resize step is expensive here, so coalesce them
         self._resize_timer = QTimer(self)
@@ -1207,7 +1624,22 @@ class SoftwareVideoWidget(VideoWidgetBase, QWidget):
         aspect = self.engine.display_aspect()
         W, H = self.width(), self.height()
         try:
-            if self.ascii_active:
+            if self.ascii_active and not self.ascii.is_ascii:
+                # Bayer / vector: one mpv-rendered pixel per grid pixel, converted at that
+                # size and stretched up on paint (nearest for the dither, smooth for the beams)
+                cols, rows = self.ascii.pixel_grid(W, H)
+                s = self.ascii.pixel_size()
+                vc, vr = fit_rect(aspect, cols, rows)
+                frame = self.engine.render_sw(vc, vr)
+                out = self.ascii.vector_convert(frame) if self.ascii.filter == "vector" \
+                    else self.ascii.bayer_convert(frame)
+                self._image_buf = out
+                self._image = QImage(out.data, vc, vr, out.strides[0], QImage.Format.Format_RGB32)
+                self._image_target_size = QSize(vc * s, vr * s)
+                self._image_smooth = self.ascii.filter == "vector"
+                self._image_pos = QPoint((W - vc * s) // 2, (H - vr * s) // 2)
+                self._picture_rect = QRect(self._image_pos, self._image_target_size)
+            elif self.ascii_active:
                 cols, rows = self.ascii.grid(W, H)  # already divided by the resolution divider
                 cw, ch = self.ascii.cell_w, self.ascii.cell_h
                 d = self.ascii.res_divider
@@ -1225,6 +1657,7 @@ class SoftwareVideoWidget(VideoWidgetBase, QWidget):
                     # display area by exactly the divider, so stretch it back up on paint
                     # instead of compositing that many more glyphs.
                     self._image_target_size = QSize(w * d, h * d)
+                    self._image_smooth = True
                     self._image_pos = QPoint((W - w * d) // 2, (H - h * d) // 2)
                 else:
                     self._image_target_size = None
@@ -1251,7 +1684,7 @@ class SoftwareVideoWidget(VideoWidgetBase, QWidget):
         p.fillRect(self.rect(), QColor(0, 0, 0))
         if self.has_media and self._image is not None:
             if self._image_target_size is not None:
-                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self._image_smooth)
                 p.drawImage(QRect(self._image_pos, self._image_target_size), self._image)
             else:
                 p.drawImage(self._image_pos, self._image)
@@ -1336,6 +1769,12 @@ if HAVE_GL:
             self._atlas_key = None
             self._small_fbo = None
             self._shader_ok = False
+            # Bayer / vector filter programs (separate from the ASCII one, so a driver that
+            # rejects them still gets ASCII on the GPU) and the vector edge framebuffer
+            self._progs = {}
+            self._filters_ok = False
+            self._edge_fbo = None
+            self._cpu_smooth = True
             self._keepaspect = None
             self._ready = False
             self._released = False
@@ -1404,6 +1843,8 @@ if HAVE_GL:
                 self._small_fbo = None
                 self._prog = None
                 self._vao = None
+                self._progs = {}
+                self._edge_fbo = None
                 self._crt_progs = {}
                 self._scene_fbo = None
                 self._persist = [None, None]
@@ -1441,6 +1882,13 @@ if HAVE_GL:
                 self.engine.log_message.emit("warn", "gl", f"ASCII shader unavailable, compositing on the CPU: {exc}")
             if self._shader_ok:
                 try:
+                    self._build_filter_shaders()
+                    self._filters_ok = True
+                except Exception as exc:
+                    self._filters_ok = False
+                    self.engine.log_message.emit("warn", "gl",
+                                                 f"Bayer/vector shaders unavailable, compositing them on the CPU: {exc}")
+                try:
                     self._build_crt_shaders()
                     self._crt_ok = True
                 except Exception as exc:
@@ -1477,13 +1925,24 @@ if HAVE_GL:
             return prog, u
 
         def _build_shader(self):
-            self._prog, self._u = self._compile(ASCII_FRAG, (
+            self._prog, self._u = self._compile(GLSL_COMMON + ASCII_FRAG, (
                 "u_frame", "u_atlas", "u_origin", "u_cell", "u_glyph", "u_grid", "u_fbh",
-                "u_nchars", "u_gamma", "u_mode", "u_phosphor"))
+                "u_nchars", "u_gamma", "u_mode", "u_phosphor", "u_pal_off", "u_pal_n"))
             # core profiles refuse to draw without a vertex array object bound, even an
             # empty one; compatibility profiles don't care either way
             vao = QOpenGLVertexArrayObject()
             self._vao = vao if vao.create() else None
+
+        def _build_filter_shaders(self):
+            self._progs = {
+                "bayer": self._compile(GLSL_COMMON + BAYER_FRAG, (
+                    "u_origin", "u_cell", "u_grid", "u_fbh", "u_gamma", "u_mode", "u_phosphor", "u_order",
+                    "u_spread", "u_pal_off", "u_pal_n"), (("u_frame", 0),)),
+                "edge": self._compile(GLSL_COMMON + VECTOR_EDGE_FRAG, (
+                    "u_grid", "u_mode", "u_phosphor", "u_pal_off", "u_pal_n", "u_lo", "u_hi"), (("u_frame", 0),)),
+                "vector": self._compile(VECTOR_FRAG, ("u_origin", "u_cell", "u_grid", "u_fbh", "u_glow"),
+                                        (("u_edge", 0),)),
+            }
 
         def _build_crt_shaders(self):
             self._crt_progs = {
@@ -1613,7 +2072,7 @@ if HAVE_GL:
                 return  # the common case while playing: no QPainter round trip at all
             p = QPainter(self)
             if cpu_image is not None:
-                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self._cpu_smooth)
                 p.drawImage(self._cpu_rect, cpu_image)
             self._paint_overlays(p)
             p.end()
@@ -1628,11 +2087,23 @@ if HAVE_GL:
             gl.Clear(GL_COLOR_BUFFER_BIT)
 
         def _draw_ascii(self, gl, fbo, fw, fh, dpr, W, H):
-            """Returns a QImage to paint if the shader is unavailable, else None."""
-            cols, rows = self.ascii.grid(W, H)  # already divided by the resolution divider
-            cw, ch = self.ascii.cell_w, self.ascii.cell_h
-            d = self.ascii.res_divider
-            vc, vr = fit_rect(self.engine.display_aspect() * ch / cw, cols, rows)
+            """Draw the active display filter (ASCII, Bayer or vector). Returns a QImage to
+            paint if the shader for it is unavailable, else None."""
+            kind = self.ascii.filter
+            if kind == "ascii":
+                cols, rows = self.ascii.grid(W, H)  # already divided by the resolution divider
+                cw, ch = self.ascii.cell_w, self.ascii.cell_h
+                d = self.ascii.res_divider
+                vc, vr = fit_rect(self.engine.display_aspect() * ch / cw, cols, rows)
+                cell_x, cell_y = cw * d * dpr, ch * d * dpr
+                shader_ok = self._shader_ok
+            else:
+                # Bayer / vector: a grid of square pixels instead of character cells
+                cols, rows = self.ascii.pixel_grid(W, H)
+                d = self.ascii.pixel_size()
+                vc, vr = fit_rect(self.engine.display_aspect(), cols, rows)
+                cell_x = cell_y = d * dpr
+                shader_ok = self._shader_ok and self._filters_ok
             if self._small_fbo is None or self._small_fbo.size() != QSize(vc, vr):
                 self._small_fbo = QOpenGLFramebufferObject(vc, vr)
             self._set_keepaspect(False)
@@ -1641,7 +2112,7 @@ if HAVE_GL:
             # shader and the export readback assume.
             self._clear(gl, self._small_fbo.handle(), vc, vr)
             self.engine.render_gl(self._small_fbo.handle(), vc, vr, flip_y=False)
-            crt = self.crt_active
+            crt = self.crt_active and shader_ok
             if crt:
                 self._ensure_crt_fbos(gl, fw, fh)
                 target = self._scene_fbo.handle()   # the CRT passes take it from here to the screen
@@ -1651,63 +2122,139 @@ if HAVE_GL:
             gl.Viewport(0, 0, fw, fh)
             gl.ClearColor(0.0, 0.0, 0.0, 1.0)
             gl.Clear(GL_COLOR_BUFFER_BIT)
-            cell_x, cell_y = cw * d * dpr, ch * d * dpr
             ox, oy = (fw - vc * cell_x) / 2.0, (fh - vr * cell_y) / 2.0
             self._picture_rect = QRect(int(ox), int(oy), int(vc * cell_x), int(vr * cell_y))
-            if not self._shader_ok:
+            if not shader_ok:
                 frame = self._read_small_frame()
-                out = self.ascii.convert(frame)
+                if kind == "ascii":
+                    out = self.ascii.convert(frame)
+                elif kind == "vector":
+                    out = self.ascii.vector_convert(frame)
+                else:
+                    out = self.ascii.bayer_convert(frame)
                 self._cpu_buf = out
+                self._cpu_smooth = kind not in BAYER_ORDER
                 h, w = out.shape[0], out.shape[1]
                 self._cpu_rect = QRect(int(ox / dpr), int(oy / dpr), w * d, h * d)
                 return QImage(out.data, w, h, out.strides[0], QImage.Format.Format_RGB32)
-            self._ensure_atlas_tex()
             # mpv leaves its own GL state behind; set what the quad needs explicitly
             for cap in (GL_BLEND, GL_SCISSOR_TEST, GL_DEPTH_TEST, GL_CULL_FACE):
                 gl.Disable(cap)
-            prog, u = self._prog, self._u
-            prog.bind()
             mode = self.ascii.color_mode
+            pal_off, pal_n = 0, 0
             if mode == "color":
                 mode_id, phosphor = 0, (0.0, 0.0, 0.0)
             elif mode == "raw":
                 mode_id, phosphor = 1, (0.0, 0.0, 0.0)
+            elif mode in PALETTES:
+                mode_id, phosphor = 3, (0.0, 0.0, 0.0)
+                pal_off, pal_n = PAL_OFFSETS[mode], len(PALETTES[mode][1])
             else:
                 b, g, r = PHOSPHOR[mode]
                 mode_id, phosphor = 2, (r / 255.0, g / 255.0, b / 255.0)
-            prog.setUniformValue(u["u_frame"], 0)
-            prog.setUniformValue(u["u_atlas"], 1)
-            prog.setUniformValue(u["u_origin"], QVector2D(ox, oy))
-            prog.setUniformValue(u["u_cell"], QVector2D(cell_x, cell_y))
-            prog.setUniformValue(u["u_glyph"], QVector2D(float(cw), float(ch)))
-            prog.setUniformValue(u["u_grid"], QVector2D(float(vc), float(vr)))
-            prog.setUniformValue(u["u_fbh"], float(fh))
-            prog.setUniformValue(u["u_nchars"], float(len(self.ascii.chars)))
-            prog.setUniformValue(u["u_gamma"], float(self.ascii.gamma))
-            prog.setUniformValue(u["u_mode"], mode_id)
-            prog.setUniformValue(u["u_phosphor"], QVector3D(*phosphor))
+            common = dict(origin=QVector2D(ox, oy), cell=QVector2D(cell_x, cell_y), grid=QVector2D(float(vc), float(vr)),
+                          fbh=float(fh), mode=mode_id, phosphor=QVector3D(*phosphor), pal_off=pal_off, pal_n=pal_n)
+            if kind == "ascii":
+                self._shade_ascii(gl, common)
+            elif kind == "vector":
+                self._shade_vector(gl, target, fw, fh, vc, vr, common)
+            else:
+                self._shade_bayer(gl, common, BAYER_ORDER[kind], PALETTES[mode][0] if mode in PALETTES else 0.0)
             gl.ActiveTexture(GL_TEXTURE0)
-            gl.BindTexture(GL_TEXTURE_2D, self._small_fbo.texture())
-            self._atlas_tex.bind(1)
+            gl.BindTexture(GL_TEXTURE_2D, 0)
+            if crt:
+                rect_bl = (ox, fh - oy - vr * cell_y, vc * cell_x, vr * cell_y)
+                self._draw_crt(gl, fbo, fw, fh, rect_bl, cell_y, dpr, kind)
+            return None
+
+        def _draw_triangle(self, gl):
             if self._vao is not None:
                 self._vao.bind()
             gl.DrawArrays(GL_TRIANGLES, 0, 3)
             if self._vao is not None:
                 self._vao.release()
-            self._atlas_tex.release(1)
-            gl.ActiveTexture(GL_TEXTURE0)
-            gl.BindTexture(GL_TEXTURE_2D, 0)
-            prog.release()
-            if crt:
-                rect_bl = (ox, fh - oy - vr * cell_y, vc * cell_x, vr * cell_y)
-                self._draw_crt(gl, fbo, fw, fh, rect_bl, cell_y, dpr)
-            return None
 
-        def _draw_crt(self, gl, fbo, fw, fh, rect, cell_y, dpr):
-            """The CRT screen filter: afterglow, bloom and tube composition on top of the ASCII
-            picture sitting in self._scene_fbo. `rect` is the picture in framebuffer px with a
-            bottom-left origin (GL convention), `cell_y` a character row's height in px."""
+        def _shade_ascii(self, gl, c):
+            """The ASCII shader: mpv's cell-sized render (unit 0) + glyph atlas (unit 1) -> the bound target."""
+            self._ensure_atlas_tex()
+            prog, u = self._prog, self._u
+            prog.bind()
+            prog.setUniformValue(u["u_frame"], 0)
+            prog.setUniformValue(u["u_atlas"], 1)
+            prog.setUniformValue(u["u_origin"], c["origin"])
+            prog.setUniformValue(u["u_cell"], c["cell"])
+            prog.setUniformValue(u["u_glyph"], QVector2D(float(self.ascii.cell_w), float(self.ascii.cell_h)))
+            prog.setUniformValue(u["u_grid"], c["grid"])
+            prog.setUniformValue(u["u_fbh"], c["fbh"])
+            prog.setUniformValue(u["u_nchars"], float(len(self.ascii.chars)))
+            prog.setUniformValue(u["u_gamma"], float(self.ascii.gamma))
+            prog.setUniformValue(u["u_mode"], c["mode"])
+            prog.setUniformValue(u["u_phosphor"], c["phosphor"])
+            prog.setUniformValue(u["u_pal_off"], c["pal_off"])
+            prog.setUniformValue(u["u_pal_n"], c["pal_n"])
+            gl.ActiveTexture(GL_TEXTURE0)
+            gl.BindTexture(GL_TEXTURE_2D, self._small_fbo.texture())
+            self._atlas_tex.bind(1)
+            self._draw_triangle(gl)
+            self._atlas_tex.release(1)
+            prog.release()
+
+        def _shade_bayer(self, gl, c, order, spread):
+            """The Bayer dither shader: mpv's grid-sized render (unit 0) -> the bound target."""
+            prog, u = self._progs["bayer"]
+            prog.bind()
+            prog.setUniformValue(u["u_origin"], c["origin"])
+            prog.setUniformValue(u["u_cell"], c["cell"])
+            prog.setUniformValue(u["u_grid"], c["grid"])
+            prog.setUniformValue(u["u_fbh"], c["fbh"])
+            prog.setUniformValue(u["u_gamma"], float(self.ascii.gamma))
+            prog.setUniformValue(u["u_mode"], c["mode"])
+            prog.setUniformValue(u["u_phosphor"], c["phosphor"])
+            prog.setUniformValue(u["u_order"], int(order))
+            prog.setUniformValue(u["u_spread"], float(spread))
+            prog.setUniformValue(u["u_pal_off"], c["pal_off"])
+            prog.setUniformValue(u["u_pal_n"], c["pal_n"])
+            gl.ActiveTexture(GL_TEXTURE0)
+            gl.BindTexture(GL_TEXTURE_2D, self._small_fbo.texture())
+            self._draw_triangle(gl)
+            prog.release()
+
+        def _shade_vector(self, gl, target, fw, fh, vc, vr, c):
+            """The vector display: edge pass into the grid-sized edge framebuffer, then the
+            beam pass onto `target` (fw x fh)."""
+            if self._edge_fbo is None or self._edge_fbo.size() != QSize(vc, vr):
+                self._edge_fbo = self._make_fbo(gl, vc, vr)
+            prog, u = self._progs["edge"]
+            prog.bind()
+            prog.setUniformValue(u["u_grid"], c["grid"])
+            prog.setUniformValue(u["u_mode"], c["mode"])
+            prog.setUniformValue(u["u_phosphor"], c["phosphor"])
+            prog.setUniformValue(u["u_pal_off"], c["pal_off"])
+            prog.setUniformValue(u["u_pal_n"], c["pal_n"])
+            prog.setUniformValue(u["u_lo"], float(VECTOR_EDGE_LO))
+            prog.setUniformValue(u["u_hi"], float(VECTOR_EDGE_HI))
+            self._run_pass(gl, self._edge_fbo.handle(), vc, vr, (self._small_fbo.texture(),))
+            prog.release()
+            prog, u = self._progs["vector"]
+            prog.bind()
+            prog.setUniformValue(u["u_origin"], c["origin"])
+            prog.setUniformValue(u["u_cell"], c["cell"])
+            prog.setUniformValue(u["u_grid"], c["grid"])
+            prog.setUniformValue(u["u_fbh"], c["fbh"])
+            prog.setUniformValue(u["u_glow"], float(VECTOR_GLOW))
+            self._run_pass(gl, target, fw, fh, (self._edge_fbo.texture(),))
+            prog.release()
+
+        def _draw_crt(self, gl, fbo, fw, fh, rect, cell_y, dpr, kind="ascii"):
+            """The CRT screen filter: afterglow, bloom and tube composition on top of the
+            filtered picture sitting in self._scene_fbo. `rect` is the picture in framebuffer
+            px with a bottom-left origin (GL convention), `cell_y` a character row's (or grid
+            pixel's) height in px, `kind` the display filter that drew the picture: a vector
+            monitor has no shadow mask and no scanlines - just the beam on the phosphor, which
+            lingers longer - so those are left out for `vector`."""
             lvl = CRT_LEVELS[self.ascii.crt_level][1]
+            vector = kind == "vector"
+            tau_scale = 1.8 if vector else 1.0
             now = time.monotonic()
             dt = 0.0 if self._crt_last_t is None else min(0.1, max(0.0, now - self._crt_last_t))
             self._crt_last_t = now
@@ -1718,7 +2265,7 @@ if HAVE_GL:
             prog, u = self._crt_progs["persist"]
             prog.bind()
             prog.setUniformValue(u["u_res"], QVector2D(float(fw), float(fh)))
-            prog.setUniformValue(u["u_decay"], QVector3D(*(math.exp(-dt / t) for t in lvl["tau"])))
+            prog.setUniformValue(u["u_decay"], QVector3D(*(math.exp(-dt / (t * tau_scale)) for t in lvl["tau"])))
             prog.setUniformValue(u["u_floor"], float(dt * 0.5))
             prog.setUniformValue(u["u_dtn"], float(dt * 60.0))
             self._run_pass(gl, cur.handle(), fw, fh, (self._scene_fbo.texture(), prev.texture()))
@@ -1736,19 +2283,24 @@ if HAVE_GL:
             prog.setUniformValue(u["u_prep"], 0)
             self._run_pass(gl, self._bloom[1].handle(), bw, bh, (self._bloom[0].texture(),))
             prog.release()
-            # 3. the tube itself, onto the screen
-            lines_per_row = max(1, int(round(cell_y / (4.0 * dpr))))
+            # 3. the tube itself, onto the screen. Scanlines: a whole number per character
+            # row; on the pixel grids of the Bayer filter a whole number of grid rows per
+            # scanline instead, so the lines never beat against the dither pattern.
+            if kind == "ascii":
+                scan_period = cell_y / max(1, int(round(cell_y / (4.0 * dpr))))
+            else:
+                scan_period = cell_y * max(1, int(round(3.0 * dpr / cell_y)))
             prog, u = self._crt_progs["crt"]
             prog.bind()
             prog.setUniformValue(u["u_res"], QVector2D(float(fw), float(fh)))
             prog.setUniformValue(u["u_rect"], QVector4D(*(float(v) for v in rect)))
             prog.setUniformValue(u["u_curve"], float(lvl["curve"]))
             prog.setUniformValue(u["u_corner"], float(0.035 * min(rect[2], rect[3])))
-            prog.setUniformValue(u["u_mask"], float(lvl["mask"]))
+            prog.setUniformValue(u["u_mask"], 0.0 if vector else float(lvl["mask"]))
             prog.setUniformValue(u["u_mask_px"], float(max(1, round(dpr))))
-            prog.setUniformValue(u["u_scan"], float(lvl["scan"]))
-            prog.setUniformValue(u["u_scan_period"], float(cell_y / lines_per_row))
-            prog.setUniformValue(u["u_bloom_amt"], float(lvl["bloom"]))
+            prog.setUniformValue(u["u_scan"], 0.0 if vector else float(lvl["scan"]))
+            prog.setUniformValue(u["u_scan_period"], float(scan_period))
+            prog.setUniformValue(u["u_bloom_amt"], float(lvl["bloom"] * (1.3 if vector else 1.0)))
             prog.setUniformValue(u["u_grain"], float(lvl["grain"]))
             prog.setUniformValue(u["u_hum"], float(lvl["hum"]))
             prog.setUniformValue(u["u_vignette"], float(lvl["vignette"]))
@@ -1889,16 +2441,23 @@ class MainWindow(QMainWindow):
         self.use_gl = HAVE_GL and args.renderer != "software"
         if args.renderer == "gl" and not HAVE_GL:
             raise RuntimeError("--renderer gl: PyQt6's QtOpenGL/QtOpenGLWidgets modules are not installed")
-        self.engine = Engine(hwdec=args.hwdec, gl=self.use_gl, ytdl_format=args.ytdl_format)
+        self.engine = Engine(hwdec=args.hwdec, gl=self.use_gl, ytdl_format=args.ytdl_format,
+                             ytdl_raw=Engine.ytdl_raw_options(args.ytdl_cookies_from_browser, args.ytdl_client,
+                                                              args.ytdl_raw_options))
         family = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
         self.ascii = AsciiRenderer(family, font_px=args.font_size)
         self.video = self._make_video_widget()
-        self.video.ascii_mode = bool(args.ascii)
+        start_filter = args.filter or ("ascii" if args.ascii else "off")
+        self.video.ascii_mode = start_filter != "off"
+        if start_filter != "off":
+            self.ascii.filter = start_filter
+        self.ascii.set_pixel_px(args.pixel_size)
         self.video.fps_log = bool(args.fps)
         self.ascii.crt_on = bool(args.crt)
         self.ascii.crt_level = CRT_LEVEL_NAMES.index(args.crt_level)
 
         self.audio_mode = False       # current file has no real video -> visualiser
+        self._ytdl_hint_until = 0.0   # while set, keep YTDL_BOT_HINT on screen (see _on_log)
         self.crop_index = 0           # index into CROP_RATIOS; 0 = no crop
         self.repeat_index = 0         # index into REPEAT_MODES
         self.shuffled = False         # playlist-shuffle applied (Ctrl+L toggles it back)
@@ -1960,6 +2519,7 @@ class MainWindow(QMainWindow):
 
         self.ramp_combo.setCurrentIndex(max(0, self.ramp_combo.findData(self.ascii.ramp_name)))
         self.res_combo.setCurrentIndex(max(0, self.res_combo.findData(self.ascii.res_divider)))
+        self.filter_combo.setCurrentIndex(max(0, self.filter_combo.findData(self.ascii.filter)))
         self._apply_ascii_state(flash=False)
         self._apply_crt_state(flash=False)
         # mpv can't show video until a render context exists; the GL one only comes into
@@ -2096,11 +2656,24 @@ class MainWindow(QMainWindow):
         self.viz_label.hide()
         self.viz_combo.hide()
 
+        self.filter_combo = QComboBox()
+        for name, _label in FILTERS:
+            self.filter_combo.addItem(FILTER_SHORT[name], name)
+        self.filter_combo.setToolTip("Display filter: ASCII art, Bayer 1-bit dithering (2x2 / 4x4 / 8x8 matrix) "
+                                     "or a vector display drawing the picture's edges (t cycles through them)")
+        # size to the longest entry, not to a fixed sample string, but no wider than that
+        self.filter_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.filter_combo.currentIndexChanged.connect(self._filter_combo_changed)
+        lay.addWidget(self.filter_combo)
+
         self.ascii_btn = QToolButton()
         self.ascii_btn.setText("ASCII")
         self.ascii_btn.setCheckable(True)
-        self.ascii_btn.setToolTip("ASCII art filter (t)")
+        self.ascii_btn.setToolTip("Display filter on/off (Shift+T; t cycles through the filters)")
         self.ascii_btn.clicked.connect(self.toggle_ascii)
+        # fixed to the widest of the three captions so switching filters never shifts the row
+        _fm = QFontMetrics(self.ascii_btn.font())
+        self.ascii_btn.setFixedWidth(max(_fm.horizontalAdvance(t) for t in FILTER_BUTTON.values()) + 26)
         lay.addWidget(self.ascii_btn)
 
         self.crt_btn = QToolButton()
@@ -2115,7 +2688,8 @@ class MainWindow(QMainWindow):
         self.ramp_combo = QComboBox()
         for name in CHAR_RAMPS:
             self.ramp_combo.addItem(f"{name} ({len(CHAR_RAMPS[name])})", name)
-        self.ramp_combo.setToolTip("Character set, from just a few characters to a lot (r)")
+        self.ramp_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.ramp_combo.setToolTip("Character set for the ASCII filter, from just a few characters to a lot (r)")
         self.ramp_combo.currentIndexChanged.connect(self._ramp_combo_changed)
         lay.addWidget(self.ramp_combo)
 
@@ -2123,7 +2697,9 @@ class MainWindow(QMainWindow):
         self.res_combo = QComboBox()
         for label, divider in RES_DIVIDERS:
             self.res_combo.addItem(label, divider)
-        self.res_combo.setToolTip("ASCII resolution divider - lower detail renders faster (d)")
+        self.res_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.res_combo.setToolTip("Resolution divider: fewer, bigger characters / dither pixels - "
+                                  "lower detail renders faster (d)")
         self.res_combo.currentIndexChanged.connect(self._res_combo_changed)
         lay.addWidget(self.res_combo)
 
@@ -2141,8 +2717,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.vol_slider)
 
         for w in (self.play_btn, self.seek_slider, self.speed_spin, self.audio_combo, self.sub_combo,
-                  self.viz_combo, self.ascii_btn, self.crt_btn, self.ramp_combo, self.res_combo, self.mute_btn,
-                  self.vol_slider):
+                  self.viz_combo, self.filter_combo, self.ascii_btn, self.crt_btn, self.ramp_combo, self.res_combo,
+                  self.mute_btn, self.vol_slider):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
     def _build_playlist(self):
@@ -2280,27 +2856,34 @@ class MainWindow(QMainWindow):
         self.sub_menu = m.addMenu("Track")
 
         m = mb.addMenu("&Video")
-        self.ascii_action = self._act(m, "ASCII art filter", "T", self.toggle_ascii, checkable=True)
+        self._act(m, "Next display filter (off / ASCII / Bayer 2×2, 4×4, 8×8 / vector)", "T", self.next_filter)
+        self.ascii_action = self._act(m, "Display filter on/off", "Shift+T", self.toggle_ascii, checkable=True)
         self._act(m, "Cycle crop / aspect ratio", "C", self.cycle_crop)
         self._act(m, "Next colour mode", "E", self.next_color_mode)
-        self._act(m, "Next character set", "R", self.next_ramp)
-        self._act(m, "Next ASCII resolution", "D", self.next_res_divider)
-        self._act(m, "Smaller characters", ["Ctrl+-", "Ctrl+_"], lambda: self.change_font_px(-1))
-        self._act(m, "Bigger characters", ["Ctrl+=", "Ctrl++"], lambda: self.change_font_px(1))
+        self._act(m, "Next character set (ASCII)", "R", self.next_ramp)
+        self._act(m, "Next resolution (characters / dither pixels)", "D", self.next_res_divider)
+        self._act(m, "Smaller characters / pixels", ["Ctrl+-", "Ctrl+_"], lambda: self.change_font_px(-1))
+        self._act(m, "Bigger characters / pixels", ["Ctrl+=", "Ctrl++"], lambda: self.change_font_px(1))
         m.addSeparator()
-        self.crt_action = self._act(m, "CRT screen (on top of ASCII art)", "G", self.toggle_crt, checkable=True)
+        self.crt_action = self._act(m, "CRT screen (on top of the display filter)", "G", self.toggle_crt,
+                                    checkable=True)
         self._act(m, "Next CRT intensity", "Shift+G", self.next_crt_level)
         m.addSeparator()
         self.crop_menu = m.addMenu("Crop / aspect ratio")
         for i, (label, _) in enumerate(CROP_RATIOS):
             self._act(self.crop_menu, label, None, lambda _=False, ix=i: self.set_crop(ix))
+        self.filter_menu = m.addMenu("Display filter")
+        self.filter_actions = {}
+        for name, label in [("off", "off")] + FILTERS:
+            self.filter_actions[name] = self._act(self.filter_menu, label, None,
+                                                  lambda _=False, nm=name: self.set_filter(nm), checkable=True)
         self.color_menu = m.addMenu("Colour mode")
         for mode in COLOR_MODES:
-            self._act(self.color_menu, mode, None, lambda _=False, md=mode: self.set_color_mode(md))
+            self._act(self.color_menu, COLOR_MODE_LABELS[mode], None, lambda _=False, md=mode: self.set_color_mode(md))
         self.ramp_menu = m.addMenu("Character set")
         for name in CHAR_RAMPS:
             self._act(self.ramp_menu, name, None, lambda _=False, nm=name: self.set_ramp(nm))
-        self.res_menu = m.addMenu("ASCII resolution")
+        self.res_menu = m.addMenu("Resolution")
         for label, divider in RES_DIVIDERS:
             self._act(self.res_menu, label, None, lambda _=False, dv=divider: self.set_res_divider(dv))
         self.crt_menu = m.addMenu("CRT intensity")
@@ -2446,7 +3029,7 @@ class MainWindow(QMainWindow):
         self.video.flash(f"{title}\n{kind}")
 
     def _on_file_ended(self, reason):
-        if reason in ("error",):
+        if reason in ("error",) and time.monotonic() >= self._ytdl_hint_until:
             self.video.flash("could not play this file")
         if self.engine.prop("playlist-count", 0) == 0 or reason == "stop":
             self.video.has_media = False
@@ -2499,7 +3082,15 @@ class MainWindow(QMainWindow):
 
     def _on_log(self, level, prefix, text):
         if level in ("error", "fatal"):
-            self.video.flash(f"{prefix}: {text}", 4)
+            low = text.lower()
+            # matched loosely: the wording is YouTube's and it uses a typographic apostrophe
+            if "confirm you" in low and "bot" in low:
+                self.video.flash(ytdl_bot_hint(), 15)
+                # yt-dlp's failure is followed by mpv's own "failed to recognize file
+                # format", which would replace the hint on screen a moment later
+                self._ytdl_hint_until = time.monotonic() + 15
+            elif time.monotonic() >= self._ytdl_hint_until:
+                self.video.flash(f"{prefix}: {text}", 4)
         print(f"[{level}] {prefix}: {text}", file=sys.stderr)
 
     # ------------------------------------------------------------------ tracks
@@ -2862,35 +3453,74 @@ class MainWindow(QMainWindow):
             self.video.flash("playlist shuffled (Ctrl+L again restores the order)")
 
     def _apply_ascii_state(self, flash=True):
+        """Push the display filter state (on/off + which of FILTERS) into every control."""
         self.video.forced_ascii = self.audio_mode
         active = self.video.ascii_active
-        self.ascii_btn.blockSignals(True)
-        self.ascii_btn.setChecked(active)
+        kind = self.ascii.filter
+        label = FILTER_LABELS[kind]
+        for w in (self.ascii_btn, self.ascii_action):
+            w.blockSignals(True)
+            w.setChecked(active)
+            w.blockSignals(False)
+        self.ascii_btn.setText(FILTER_BUTTON[kind])
         self.ascii_btn.setEnabled(not self.audio_mode)
-        self.ascii_btn.blockSignals(False)
-        self.ascii_action.blockSignals(True)
-        self.ascii_action.setChecked(active)
-        self.ascii_action.blockSignals(False)
-        # in ASCII mode mpv must not burn subtitles into the tiny frame; we draw them ourselves
+        ix = self.filter_combo.findData(kind)
+        if ix >= 0 and ix != self.filter_combo.currentIndex():
+            self.filter_combo.blockSignals(True)
+            self.filter_combo.setCurrentIndex(ix)
+            self.filter_combo.blockSignals(False)
+        for name, a in self.filter_actions.items():
+            a.blockSignals(True)
+            a.setChecked((name == kind) if active else (name == "off"))
+            a.blockSignals(False)
+        self.ramp_combo.setEnabled(kind == "ascii")
+        # with a filter on mpv must not burn subtitles into the tiny frame; we draw them ourselves
         self.engine.set("sub-visibility", not active)
         self.video.render_now()
         if flash:
             if self.audio_mode:
-                self.video.flash("audio file: ASCII visualiser is always on")
+                self.video.flash(f"filter: {label}  (audio files always show the visualiser)")
             else:
-                self.video.flash("ASCII filter: " + ("on" if active else "off"))
+                self.video.flash("filter: " + (label if active else "off"))
 
     def toggle_ascii(self):
+        """The filter button / Shift+T: the current display filter on or off."""
         if self.audio_mode:
             self._apply_ascii_state()
             return
         self.video.ascii_mode = not self.video.ascii_mode
         self._apply_ascii_state()
 
+    def set_filter(self, name):
+        """Switch to display filter `name` (one of FILTERS) or turn the filter "off"."""
+        if name == "off":
+            if not self.audio_mode:
+                self.video.ascii_mode = False
+        else:
+            self.ascii.filter = name
+            self.video.ascii_mode = True
+        self._apply_ascii_state()
+
+    def next_filter(self):
+        """`t`: off -> ASCII -> Bayer 2x2 -> 4x4 -> 8x8 -> vector -> off (audio files, which
+        always show a filtered visualiser, skip the "off" step)."""
+        if not self.video.ascii_active:
+            self.set_filter(FILTER_NAMES[0])
+            return
+        i = FILTER_NAMES.index(self.ascii.filter) + 1
+        if i < len(FILTER_NAMES):
+            self.set_filter(FILTER_NAMES[i])
+        else:
+            self.set_filter(FILTER_NAMES[0] if self.audio_mode else "off")
+
+    def _filter_combo_changed(self, idx):
+        if idx >= 0:
+            self.set_filter(self.filter_combo.itemData(idx))
+
     def set_color_mode(self, mode):
         self.ascii.color_mode = mode
         self.video.render_now()
-        self.video.flash(f"colour mode: {mode}")
+        self.video.flash(f"colour mode: {COLOR_MODE_LABELS.get(mode, mode)}")
 
     def next_color_mode(self):
         i = COLOR_MODES.index(self.ascii.color_mode)
@@ -2911,7 +3541,7 @@ class MainWindow(QMainWindow):
         elif on:
             msg = f"CRT screen: on ({CRT_LEVEL_NAMES[self.ascii.crt_level]})"
             if not self.video.ascii_active:
-                msg += "  - shows once the ASCII filter is on (t)"
+                msg += "  - shows once a display filter is on (t)"
         else:
             msg = "CRT screen: off"
         self.video.flash(msg)
@@ -2997,7 +3627,11 @@ class MainWindow(QMainWindow):
             self.res_combo.blockSignals(False)
         self.video.render_now()
         label = next(lbl for lbl, dv in RES_DIVIDERS if dv == divider)
-        self.video.flash(f"ASCII resolution: {label}")
+        if self.video.ascii_active and not self.ascii.is_ascii:
+            cols, rows = self.ascii.pixel_grid(self.video.width(), self.video.height())
+            self.video.flash(f"resolution: {label}   {self.ascii.pixel_size()}px pixels, grid {cols}×{rows}")
+        else:
+            self.video.flash(f"resolution: {label}")
 
     def next_res_divider(self):
         dividers = [dv for _, dv in RES_DIVIDERS]
@@ -3009,14 +3643,28 @@ class MainWindow(QMainWindow):
             self.set_res_divider(self.res_combo.itemData(idx))
 
     def change_font_px(self, d):
+        """Ctrl+-/=: character size for the ASCII filter, pixel size for the Bayer and
+        vector filters (whichever is showing)."""
+        if self.video.ascii_active and not self.ascii.is_ascii:
+            self.ascii.set_pixel_px(self.ascii.pixel_px + d)
+            cols, rows = self.ascii.pixel_grid(self.video.width(), self.video.height())
+            self.video.render_now()
+            self.video.flash(f"pixels: {self.ascii.pixel_size()}px  grid {cols}×{rows}")
+            return
         self.ascii.set_font_px(self.ascii.font_px + d)
         cols, rows = self.ascii.grid(self.video.width(), self.video.height())
         self.video.render_now()
         self.video.flash(f"characters: {self.ascii.font_px}px  grid {cols}×{rows}")
 
+    def _ascii_text_ready(self):
+        """The text export needs the ASCII filter itself on screen (not Bayer/vector)."""
+        if not self.video.ascii_active or not self.ascii.is_ascii or not self.video.snapshot_ascii():
+            self.video.flash("switch to the ASCII filter first (t)")
+            return False
+        return True
+
     def save_ascii_frame(self):
-        if not self.video.ascii_active or not self.video.snapshot_ascii():
-            self.video.flash("enable the ASCII filter first (t)")
+        if not self._ascii_text_ready():
             return
         was_paused = self.engine.prop("pause", False)
         self.engine.set("pause", True)
@@ -3043,7 +3691,7 @@ class MainWindow(QMainWindow):
             self.video.flash("could not grab the picture")
             self.engine.set("pause", was_paused)
             return
-        kind = "ascii" if self.video.ascii_active else "shot"
+        kind = self.ascii.filter if self.video.ascii_active else "shot"
         base = os.path.join(os.path.expanduser("~"), f"asciiplay_{kind}_{time.strftime('%Y%m%d_%H%M%S')}")
         path, _ = QFileDialog.getSaveFileName(self, "Save screenshot", base + ".jpg",
                                               "JPEG image (*.jpg);;PNG image (*.png)")
@@ -3056,8 +3704,7 @@ class MainWindow(QMainWindow):
         self.engine.set("pause", was_paused)
 
     def copy_ascii_frame(self):
-        if not self.video.ascii_active or not self.video.snapshot_ascii():
-            self.video.flash("enable the ASCII filter first (t)")
+        if not self._ascii_text_ready():
             return
         QApplication.clipboard().setText(self.ascii.as_text())
         self.video.flash("ASCII frame copied to clipboard")
@@ -3151,6 +3798,8 @@ class MainWindow(QMainWindow):
             f = ctx.format() if ctx is not None else None
             renderer = (f"OpenGL {f.majorVersion()}.{f.minorVersion()}" if f is not None else "OpenGL")
             renderer += ", ASCII on the GPU" if getattr(self.video, "_shader_ok", False) else ", ASCII on the CPU"
+            renderer += (", Bayer/vector on the GPU" if getattr(self.video, "_filters_ok", False)
+                         else ", Bayer/vector on the CPU")
             renderer += ", CRT screen available" if self.video.crt_supported() else ", no CRT screen"
         else:
             renderer = "software (CPU), no CRT screen"
@@ -3158,8 +3807,9 @@ class MainWindow(QMainWindow):
         html = f"""
         <h2 style="margin-bottom:2px">asciiplay <span style="font-weight:normal;color:#8ce87a">{VERSION}</span></h2>
         <p>A native video and audio player with a terminal soul: anything it plays can be
-        turned into live, coloured ASCII art, and that picture can be put behind the glass
-        of a simulated CRT monitor.</p>
+        turned into live, coloured ASCII art, 1-bit Bayer-dithered pixels or the glowing
+        edge traces of a vector display, and that picture can be put behind the glass of a
+        simulated CRT monitor.</p>
         <p>What makes it different from the many terminal ASCII players: the text rendering
         is a fragment shader running inside a real desktop window, so a 5120x1440 fullscreen
         picture keeps the video's frame rate with hardware decoding staying on the GPU; the
