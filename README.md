@@ -3,8 +3,11 @@
 **A native video and audio player with a terminal soul.** Anything it plays can be turned
 into live, coloured ASCII art, 1-bit Bayer-dithered pixels or the glowing edge traces of a
 vector display, rendered by fragment shaders on the GPU so it keeps the video's frame rate
-even fullscreen at 5120x1440, and that picture can be put behind the glass of a simulated
-CRT monitor: curved tube, shadow mask, scanlines, bloom, grain and phosphor afterglow. Audio files play through the same path as one of five ffmpeg
+even fullscreen at 5120x1440, and that picture - or the plain video, run through the same
+green/amber/mono phosphor and retro-palette colour modes - can be put behind the glass of a
+simulated CRT monitor: curved tube, shadow mask, scanlines, beam focus blur, bloom, grain,
+chromatic aberration and a phosphor trail you can colour, with the blur, the trail and the
+aberration on live sliders. Audio files play through the same path as one of five ffmpeg
 visualisers. Around that sits an ordinary, complete player built on libmpv: hardware
 decoding, audio and subtitle tracks, crop presets, speed, frame stepping, screenshots,
 text export, a playlist with repeat and shuffle, drag and drop, desktop integration.
@@ -108,7 +111,8 @@ export and the software fallback.
     drawn as bright, glowing beam traces on black, like a Vectrex or an Asteroids cabinet.
     Bilinear upscaling from the pixel grid keeps the traces smooth; a white-hot core and
     a soft halo stand in for the beam.
-  - 8 **colour modes** cycled with `e`, applying to all three filters: full colour, raw,
+  - 8 **colour modes** cycled with `e`, applying to all three filters *and to plain video
+    with no filter on at all* (see below): full colour, raw,
     green, amber, mono, and three quantised palettes - **8 colours** (the 3-bit RGB set of
     the ZX Spectrum / BBC Micro), **16 colours** (CGA/EGA) and **32 colours**
     (DawnBringer's DB32 pixel-art palette). With the Bayer filters the palettes dither
@@ -120,25 +124,50 @@ export and the software fallback.
   - The `green`, `amber` and `mono` modes are a **CRT phosphor** look: the tube colour
     glows through the midtones, highlights bloom brighter, and the very brightest pixels
     desaturate towards near-white like a real monitor's beam blowing out.
+- **Colour modes on plain video** (`e` with no display filter on) — the same eight modes
+  run straight over the video, so an ordinary film plays as a **green, amber or white
+  phosphor monitor**, in **greyscale** (`raw`: the black and white TV), or **quantised to
+  8, 16 or 32 colours** with an 8×8 ordered dither, which is what a photographic picture
+  looked like on that hardware. Put the CRT screen on top and it is a tube showing a film.
+  `--color green` (or `--colour`) starts in one. It is one more shader pass over mpv's
+  picture, so like the CRT screen it needs the OpenGL renderer; the software fallback
+  keeps the video in full colour and says so.
   - **Resolution divider** — Full / Half / Quarter, in a dropdown next to the character
     set, or cycled with `d`. Half and Quarter use a quarter and a sixteenth as many
     character cells (or dither/vector pixels) respectively - fewer, bigger ones stretched
     to still fill the window - for a chunkier look; with the software renderer it is also
     the biggest lever for smoother playback in a large window. Applies to audio files
     too, since they render through the same path.
-  - **CRT screen** (`g`) — an optional filter layered on top of whatever display filter is
-    on (video and the audio visualiser alike) that makes the window look like an old tube
+  - **CRT screen** (`g`) — an optional filter that makes the window look like an old tube
     monitor: curved glass with rounded corners and a vignette, an aperture-grille shadow
-    mask, scanlines (a whole number per character row, or of dither rows per scanline),
-    bloom/glow around bright glyphs, colour convergence error towards the edges, fine
-    grain, a faint hum bar rolling down the tube, and phosphor afterglow — bright,
-    fast-moving things leave a short trail (green lingers longest, like real phosphor).
-    On the vector display the shadow mask and scanlines are left out (a vector monitor has
-    neither) and the afterglow is longer, so moving edges trail like on a real tube. Three
-    intensities (`subtle`, `normal`, `heavy`), cycled with `Shift+G` or picked from
-    Video -> CRT intensity; a `CRT` button sits next to the filter button in the control
-    bar. Screenshots include it. Needs the OpenGL renderer (it is a few more shader
-    passes); the software fallback ignores it and says so.
+    mask, scanlines (a whole number per character row, of dither rows per scanline, or of
+    raster lines over plain video), the electron beam's focus blur, bloom/glow around
+    bright spots, colour convergence error, fine grain, a faint hum bar rolling down the
+    tube, and phosphor afterglow — bright, fast-moving things leave a short trail (green
+    lingers longest, like real phosphor). It layers over whatever display filter is on
+    (video and the audio visualiser alike) **and over plain video with no filter at all**,
+    so an ordinary film can be watched as if it were playing on a TV set. On the vector
+    display the shadow mask and scanlines are left out (a vector monitor has neither) and
+    the afterglow is longer, so moving edges trail like on a real tube. Three intensities
+    (`subtle`, `normal`, `heavy`), cycled with `Shift+G` or picked from Video -> CRT
+    intensity; a `CRT` button sits next to the filter button in the control bar.
+    Screenshots include it. Needs the OpenGL renderer (it is a few more shader passes);
+    the software fallback ignores it and says so.
+  - **The three CRT knobs** — how soft, how smeary and how misconverged the tube is, live
+    while it plays: **blur** (`Ctrl+B` / `Ctrl+Shift+B`) is the electron beam's spot size,
+    from perfectly sharp to badly out of focus; **trail** (`Ctrl+T` / `Ctrl+Shift+T`) is
+    how long the phosphor keeps glowing, i.e. how far the smudge behind moving things
+    reaches; **aberration** (`Ctrl+R` / `Ctrl+Shift+R`) is the red and blue guns landing
+    off the green one, a little everywhere and much more towards the edges. Each is a
+    factor from ×0 (off) to ×4 on what the intensity level asks for, `Ctrl+0` puts all
+    three back to ×1, and `Ctrl+G` opens a small panel with the three sliders next to the
+    on/off button and the intensity, so you can dial the tube in while watching it change.
+    `--crt-blur`, `--crt-trail` and `--crt-aberr` set them from the command line.
+  - **Trail colour** (`Ctrl+Shift+G`, the dropdown in that panel, or `--crt-trail-color`) —
+    what the phosphor glows as the trail fades. `auto` keeps whatever colour the picture
+    had, which in the green/amber/mono colour modes is already that phosphor; pick `green`,
+    `amber`, `white`, `cyan`, `blue`, `magenta` or `red` and even a full-colour picture
+    smears in that one colour, like an old radar screen.
 - **Screenshots** (`Ctrl+C`) — saves what is on screen as a JPG (or PNG) file, cropped to
   the picture: the video itself, or the filtered picture when a display filter is on. Like the
   text export it pauses, asks where to save (defaulting to your home folder with a
@@ -194,6 +223,11 @@ python3 asciiplay.py movie.mkv       # open a file directly
 python3 asciiplay.py song.flac       # opens straight into the ASCII visualiser
 python3 asciiplay.py --ascii clip.mp4 --font-size 10
 python3 asciiplay.py --ascii --crt clip.mp4          # ASCII art on a CRT screen (--crt-level subtle|normal|heavy)
+python3 asciiplay.py --crt movie.mkv                 # no display filter: the film itself on a TV set
+python3 asciiplay.py --crt --color green movie.mkv   # ... on a green phosphor monitor
+python3 asciiplay.py --crt --color raw --crt-trail-color amber movie.mkv   # b/w tube, amber trails
+python3 asciiplay.py --crt --crt-blur 2 --crt-trail 2.5 --crt-aberr 3 movie.mkv   # a tired old tube
+python3 asciiplay.py --crt --crt-blur 0 --crt-trail 0 --crt-aberr 0 movie.mkv     # glass and scanlines only
 python3 asciiplay.py --filter bayer4 clip.mp4        # start with a display filter: ascii, bayer2/4/8 or vector
 python3 asciiplay.py --filter vector --crt --pixel-size 3 clip.mp4
 python3 asciiplay.py "https://www.youtube.com/watch?v=..."   # needs yt-dlp
@@ -303,8 +337,14 @@ after another app steals a file type back).
 | `E` | Next colour mode (colour / raw / green / amber / mono / 8 / 16 / 32 colours) |
 | `R` | Next character set (ASCII) |
 | `D` | Next resolution (Full / Half / Quarter): characters or dither pixels |
-| `G` | CRT screen on/off (on top of the display filter) |
+| `G` | CRT screen on/off (over the display filter, or over plain video) |
 | `Shift+G` | Next CRT intensity (subtle / normal / heavy) |
+| `Ctrl+G` | CRT screen panel: on/off, intensity and the three sliders |
+| `Ctrl+B` / `Ctrl+Shift+B` | More / less CRT focus blur |
+| `Ctrl+T` / `Ctrl+Shift+T` | More / less CRT phosphor trail (the smudge) |
+| `Ctrl+R` / `Ctrl+Shift+R` | More / less CRT chromatic aberration |
+| `Ctrl+0` | CRT blur / trail / aberration back to the level's defaults |
+| `Ctrl+Shift+G` | Next CRT trail colour (auto / green / amber / white / …) |
 | `Ctrl+-` / `Ctrl+=` | Smaller / bigger characters (ASCII) or pixels (Bayer / vector) |
 | `V` | Next audio visualiser |
 | `S` | Save current ASCII frame to a text file |
@@ -352,16 +392,25 @@ into a second grid-sized framebuffer and then upscales that bilinearly while add
 beam core and halo. The palette modes look up the nearest entry in a constant table
 compiled into the shaders. All of it has a numpy twin for the software renderer.
 
-With the CRT screen on, the filter shader draws into an off-screen framebuffer instead of
-the window and three small passes follow: one folds the picture into a persistence buffer
-(each pixel becomes the brighter of the new frame and the decayed previous one, with
-per-channel decay times so trails go slightly green - that is the afterglow), one blurs a
-half-size, highlight-weighted copy for the bloom, and the last one composes the tube on
-screen: barrel distortion with a rounded face, convergence error, scanlines, the aperture
-grille, bloom, grain, hum bar and vignette. All of it is per-pixel shader work, so it
-costs a few extra full-screen texture reads and still runs at the source frame rate in a
-5120x1440 fullscreen window. While paused the widget keeps repainting at 25 Hz so the
-grain and the afterglow keep living.
+With no display filter but a colour mode other than full colour, one more pass runs over
+mpv's picture instead: greyscale, the phosphor glow curve, or an 8x8 Bayer dither followed
+by the same nearest-palette lookup the filters use (a constant table compiled into the
+shader). It is the same code the ASCII and Bayer shaders tint with, so the modes match
+whether a filter is on or not.
+
+With the CRT screen on, whatever drew the picture - a filter shader, that colour pass, or
+mpv itself - draws into an off-screen framebuffer instead of the window, and a few small
+passes follow: one folds the picture into a persistence buffer (each pixel becomes the
+brighter of the new frame and the decayed previous one, with per-channel decay times so
+trails go slightly green - that is the afterglow, the trail knob scales those times, and
+the trail colour, when set, re-tints what the phosphor still holds), two blur it a little
+for the beam's focus (horizontally, then a bit less vertically - skipped entirely at blur
+×0), two more blur a half-size, highlight-weighted copy for the bloom, and the last one
+composes the tube on screen: barrel distortion with a rounded face, convergence error,
+scanlines, the aperture grille, bloom, grain, hum bar and vignette. All of it is per-pixel
+shader work, so it costs a few extra full-screen texture reads and still runs at the source
+frame rate in a 5120x1440 fullscreen window. While paused the widget keeps repainting at
+25 Hz so the grain and the afterglow keep living.
 
 Subtitles are drawn
 by the app itself on top of the ASCII grid with QPainter (mpv's own subtitle burn-in is

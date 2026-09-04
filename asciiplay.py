@@ -5,8 +5,12 @@ asciiplay - a small native video/audio player with a terminal look.
   * drag & drop video, audio, subtitle files or URLs
   * audio / subtitle track selection, playback speed
   * ASCII art filter: the video is rendered as coloured text
-  * optional CRT screen on top of the ASCII art (curvature, shadow mask, scanlines, bloom,
-    grain, afterglow) - OpenGL renderer only
+  * colour modes (phosphor green/amber/mono, greyscale, retro palettes) for the filters
+    and for plain video alike
+  * optional CRT screen over the picture - with a display filter under it or straight on
+    plain video, for a TV look (curvature, shadow mask, scanlines, focus blur, bloom,
+    grain, chromatic aberration, phosphor trail; the last three adjustable, and the trail
+    can be given a colour) - OpenGL only
   * audio files are always shown as an ASCII visualiser
   * checks its dependencies and prints the install commands if something is missing
 
@@ -27,7 +31,7 @@ import threading
 import time
 
 APP_NAME = "asciiplay"
-VERSION = "1.2"
+VERSION = "1.3"
 HOMEPAGE = "https://github.com/3p1cball-code/asciiplay"
 
 # --------------------------------------------------------------------------------------
@@ -178,9 +182,28 @@ def parse_args(argv):
                    help="size of one dither/vector pixel in screen pixels for the Bayer and vector filters "
                         "(default 2; the resolution divider multiplies it)")
     p.add_argument("--crt", action="store_true",
-                   help="start with the CRT screen filter on (shows on top of the ASCII art; OpenGL renderer only)")
+                   help="start with the CRT screen filter on (over the display filter, or over plain video "
+                        "for a TV look; OpenGL renderer only)")
     p.add_argument("--crt-level", choices=["subtle", "normal", "heavy"], default="normal",
                    help="how strong the CRT screen filter is (default normal)")
+    # the three live CRT knobs (see CRT_KNOBS); 4 is CRT_KNOB_MAX, which is defined further
+    # down - this function already runs during the dependency check, before that point
+    p.add_argument("--crt-blur", type=float, default=1.0, metavar="X",
+                   help="scale the CRT's focus blur (the beam's spot size): 0 = perfectly sharp, "
+                        "1 = what the intensity level asks for (default), up to 4")
+    p.add_argument("--crt-trail", type=float, default=1.0, metavar="X",
+                   help="scale the CRT's phosphor trail (the smudge behind moving things): 0 = none, "
+                        "1 = default, up to 4")
+    p.add_argument("--crt-aberr", type=float, default=1.0, metavar="X",
+                   help="scale the CRT's chromatic aberration (colour convergence error): 0 = none, "
+                        "1 = default, up to 4")
+    p.add_argument("--crt-trail-color", "--crt-trail-colour", metavar="NAME", default="auto",
+                   help="colour the phosphor trail glows as it fades: auto (the picture's own colours), "
+                        "green, amber, white, cyan, blue, magenta or red (default auto)")
+    p.add_argument("--color", "--colour", dest="color", metavar="MODE", default=None,
+                   help="start in this colour mode: color, raw (greyscale), green, amber, mono, pal8, "
+                        "pal16 or pal32. Applies to the display filters and, with none of them on, to "
+                        "the video itself")
     p.add_argument("--hwdec", default=None,
                    help="mpv hwdec setting (default: auto-safe with the OpenGL renderer, auto-copy with the "
                         "software renderer; use 'no' to disable)")
@@ -297,7 +320,9 @@ CHAR_RAMPS = {
 }
 # Colour modes cycled with `e`. The first five tint the picture directly (full colour,
 # the raw video colour, and three CRT phosphors); the `pal*` modes snap every colour to a
-# fixed retro palette (see PALETTES). All of them apply to every display filter.
+# fixed retro palette (see PALETTES). All of them apply to every display filter, and with
+# no filter on to the video itself (VIDEO_COLOR_FRAG), where `raw` means plain greyscale -
+# the black and white TV - since the picture is already the raw video colour.
 COLOR_MODES = ["color", "raw", "green", "amber", "mono", "pal8", "pal16", "pal32"]
 COLOR_MODE_LABELS = {"color": "colour", "raw": "raw", "green": "green phosphor", "amber": "amber phosphor",
                      "mono": "mono phosphor", "pal8": "8 colours (RGB)", "pal16": "16 colours (CGA)",
@@ -379,17 +404,57 @@ PHOSPHOR = {"green": (80, 255, 90), "amber": (0, 180, 255), "mono": (230, 230, 2
 #   hum       a faint brightness bar slowly rolling down the tube
 #   vignette  corner darkening
 #   aberr     colour convergence error at the edge of the picture, in pixels
+#   blur      focus blur: the electron beam's spot size, as a gaussian sigma in pixels
+#             (horizontal; vertically it is CRT_BLUR_ASPECT of that, like a real tube's
+#             limited video bandwidth)
 #   tau       phosphor afterglow: per-channel (R, G, B) decay time constants in seconds -
 #             bright things leave a short trail, and the green phosphor lingers longest
+# Three of those - blur, tau ("smudge"/trail length) and aberr - are also live knobs: the
+# user scales them with CRT_KNOBS (Ctrl+B / Ctrl+T / Ctrl+R, or the CRT screen dialog),
+# and what the shaders get is the level's value times that factor.
 CRT_LEVELS = [
     ("subtle", dict(curve=0.03, mask=0.12, scan=0.18, bloom=0.45, grain=0.025, hum=0.015, vignette=0.25,
-                    aberr=0.6, tau=(0.08, 0.12, 0.07))),
+                    aberr=1.0, blur=0.35, tau=(0.08, 0.12, 0.07))),
     ("normal", dict(curve=0.06, mask=0.22, scan=0.30, bloom=0.70, grain=0.05, hum=0.03, vignette=0.40,
-                    aberr=1.2, tau=(0.12, 0.18, 0.10))),
+                    aberr=2.0, blur=0.65, tau=(0.12, 0.18, 0.10))),
     ("heavy", dict(curve=0.10, mask=0.35, scan=0.42, bloom=1.00, grain=0.09, hum=0.05, vignette=0.55,
-                   aberr=2.0, tau=(0.18, 0.28, 0.15))),
+                   aberr=3.2, blur=1.10, tau=(0.18, 0.28, 0.15))),
 ]
 CRT_LEVEL_NAMES = [name for name, _ in CRT_LEVELS]
+# The three adjustable CRT knobs: attribute on AsciiRenderer, label, OSD unit and the
+# shortcut that raises it. Each is a factor on the CRT_LEVELS value above, 0 = off.
+CRT_KNOBS = [
+    ("crt_blur", "blur", "px", "Ctrl+B"),
+    ("crt_trail", "trail", "s", "Ctrl+T"),
+    ("crt_aberr", "aberration", "px", "Ctrl+R"),
+]
+CRT_KNOB_MAX = 4.0     # x4 the level's value
+# What colour the phosphor trail glows as it fades (cycled with Ctrl+Shift+G). "auto"
+# keeps whatever colour the picture had - which in the green/amber/mono colour modes is
+# already that phosphor - and the rest force one, so a full-colour picture can still smear
+# green like an old radar screen. RGB, 0-255.
+CRT_TRAIL_TINTS = [
+    ("auto", None),
+    ("green", (80, 255, 90)),
+    ("amber", (255, 180, 0)),
+    ("white", (235, 235, 235)),
+    ("cyan", (90, 230, 255)),
+    ("blue", (90, 130, 255)),
+    ("magenta", (255, 100, 220)),
+    ("red", (255, 70, 40)),
+]
+CRT_TINT_NAMES = [name for name, _ in CRT_TRAIL_TINTS]
+CRT_KNOB_STEP = 0.25
+CRT_BLUR_ASPECT = 0.7  # vertical focus blur, relative to the horizontal one
+# A focus blur wider than this (in screen pixels) is done at half resolution: a picture
+# that soft has no detail left to lose, and full-resolution taps that far apart are what
+# makes the pass expensive on a big screen.
+CRT_BLUR_HALF_PX = 1.5
+# CRT screen filter on plain video (no display filter): how many scanlines the tube draws
+# over the picture - a whole number of them, never closer together than CRT_SCAN_MIN_PX
+# screen pixels, so they stay visible instead of turning into moire on a big display.
+CRT_VIDEO_LINES = 486
+CRT_SCAN_MIN_PX = 4.0
 
 # lavfi filter graphs producing a video stream out of the audio. {W}x{H} is filled in.
 VISUALIZERS = [
@@ -651,14 +716,55 @@ void main() {
 }
 """
 
-# CRT screen filter (see CRT_LEVELS): three more passes run after the ASCII shader when it
-# is on. The ASCII picture goes to an off-screen framebuffer instead of the screen; then
+# Colour modes without a display filter (see COLOR_MODES): one pass over mpv's picture,
+# so an ordinary video can run as a green/amber/white phosphor tube or through one of the
+# retro palettes. `color` never gets here (full colour is the picture as it is); `raw` is
+# plain greyscale - the black and white TV; the phosphor modes use the same glow curve as
+# the ASCII shader; the palettes snap every pixel to the nearest entry after an 8x8 Bayer
+# dither, so a photographic picture bands the way it would on that hardware.
+VIDEO_COLOR_FRAG = """
+uniform sampler2D u_frame;    // mpv's picture, framebuffer sized
+uniform vec2 u_res;
+uniform int u_mode;           // 1 greyscale, 2 phosphor, 3 palette
+uniform vec3 u_phosphor;      // tube colour for mode 2 (RGB, 0..1)
+uniform int u_pal_off;        // palette for mode 3: first entry in PAL, and how many
+uniform int u_pal_n;
+uniform float u_spread;       // how far the dither pushes a colour before it snaps
+uniform float u_dither_px;    // size of one dither cell, framebuffer pixels
+out vec4 fragColor;
+void main() {
+    vec2 uv = gl_FragCoord.xy / u_res;
+    vec3 c = texture(u_frame, uv).rgb;
+    float lum = dot(c, vec3(77.0, 151.0, 28.0) / 256.0);
+    vec3 col;
+    if (u_mode == 1) {
+        col = vec3(lum);
+    } else if (u_mode == 2) {
+        // the tube colour glows through the midtones, the brightest bits blow out to white.
+        // No lift off black here (unlike the ASCII shader, where it only ever lands inside
+        // a glyph): the letterbox around the picture has to stay properly black.
+        vec3 glow = clamp(lum * 1.15, 0.0, 1.0) * u_phosphor;
+        float hot = pow(clamp((lum - 0.7) / 0.3, 0.0, 1.0), 2.0) * 0.85;
+        col = glow * (1.0 - hot) + hot;
+    } else {
+        float t = bayer(ivec2(gl_FragCoord.xy / u_dither_px), 3);
+        col = nearest_pal(clamp(c + (t - 0.5) * u_spread, 0.0, 1.0), u_pal_off, u_pal_n);
+    }
+    fragColor = vec4(col, 1.0);
+}
+"""
+
+# CRT screen filter (see CRT_LEVELS): a few more passes run after the picture is drawn -
+# either by one of the display-filter shaders above or, with no filter on, by mpv itself.
+# That picture goes to an off-screen framebuffer instead of the screen; then
 #   1. CRT_PERSIST_FRAG folds it into a persistence buffer (phosphor afterglow: each pixel
 #      is the brighter of the new frame and the decayed previous one, so bright, fast
-#      moving things leave a short trail),
-#   2. CRT_BLUR_FRAG blurs a highlight-weighted, half-size copy of that (two passes,
-#      horizontal then vertical) for the bloom,
-#   3. CRT_FRAG composes the screen: barrel distortion with a rounded tube face, colour
+#      moving things leave a short trail - the "smudge"),
+#   2. CRT_FOCUS_FRAG blurs that a little (two passes, horizontal then vertical): the
+#      electron beam's spot is not a sharp pixel. Skipped when the blur knob is at 0,
+#   3. CRT_BLUR_FRAG blurs a highlight-weighted, half-size copy of it (two passes again)
+#      for the bloom,
+#   4. CRT_FRAG composes the screen: barrel distortion with a rounded tube face, colour
 #      convergence error, scanlines, aperture-grille shadow mask, bloom, grain, a faint
 #      rolling hum bar and a vignette.
 # All of them draw the same full-screen triangle as ASCII_VERT.
@@ -669,6 +775,8 @@ uniform vec2 u_res;
 uniform vec3 u_decay;         // per-channel multiplier for this frame's time step
 uniform float u_floor;        // taken off every frame so faint trails reach zero in 8 bits instead of sticking
 uniform float u_dtn;          // time step in 60ths of a second
+uniform vec3 u_tint;          // what colour the trail glows as it fades
+uniform float u_tint_mix;     // 0 = whatever colour the picture had (CRT_TRAIL_TINTS "auto")
 out vec4 fragColor;
 void main() {
     vec2 uv = gl_FragCoord.xy / u_res;
@@ -676,7 +784,32 @@ void main() {
     vec3 p = texture(u_prev, uv).rgb;
     // brightly lit phosphor keeps glowing, dim areas let go quickly
     float keep = pow(mix(0.8, 1.0, smoothstep(0.15, 0.7, max(max(p.r, p.g), p.b))), u_dtn);
-    fragColor = vec4(max(c, p * u_decay * keep - u_floor), 1.0);
+    vec3 kept = p * u_decay * keep - u_floor;
+    // a tinted trail glows in the phosphor's own colour, as bright as the beam left it
+    if (u_tint_mix > 0.0) kept = mix(kept, max(max(kept.r, kept.g), kept.b) * u_tint, u_tint_mix);
+    fragColor = vec4(max(c, kept), 1.0);
+}
+"""
+CRT_FOCUS_FRAG = """
+uniform sampler2D u_src;
+uniform vec2 u_res;           // size of the target
+uniform vec2 u_dir;           // a one-pixel step along the blur axis, in texture coordinates
+uniform float u_sigma;        // beam spot size along that axis, in pixels
+out vec4 fragColor;
+void main() {
+    vec2 uv = gl_FragCoord.xy / u_res;
+    float s = max(u_sigma, 0.05);
+    // taps half a sigma apart (never closer than a pixel), so a wide spot stays cheap
+    float tap = max(1.0, s * 0.5);   // not `step`: that is a GLSL built-in
+    vec3 acc = texture(u_src, uv).rgb;
+    float wsum = 1.0;
+    for (int i = 1; i <= 4; ++i) {
+        float d = float(i) * tap;
+        float w = exp(-0.5 * d * d / (s * s));
+        acc += (texture(u_src, uv + u_dir * d).rgb + texture(u_src, uv - u_dir * d).rgb) * w;
+        wsum += 2.0 * w;
+    }
+    fragColor = vec4(acc / wsum, 1.0);
 }
 """
 CRT_BLUR_FRAG = """
@@ -742,7 +875,8 @@ void main() {
     }
     vec2 src = u_rect.xy + (ns * 0.5 + 0.5) * u_rect.zw;         // where on the picture we are, px
     vec2 uv = src / u_res;
-    vec2 ab = ns * u_aberr / u_res;                                // convergence error grows outwards
+    // convergence error: a little of it everywhere, much more towards the edges
+    vec2 ab = ns * (0.25 + 0.75 * dot(ns, ns)) * u_aberr / u_res;
     vec3 col = vec3(texture(u_scene, uv + ab).r, texture(u_scene, uv).g, texture(u_scene, uv - ab).b);
     float lum = dot(col, vec3(0.299, 0.587, 0.114));
     // scanlines ride on the (curved) picture; a bright beam is fatter and fills the gaps
@@ -1106,10 +1240,16 @@ class AsciiRenderer:
         # screen pixels.
         self.filter = "ascii"
         self.pixel_px = 2
-        # CRT screen filter on top of the ASCII picture (GL renderer only; see CRT_LEVELS).
-        # Kept here with the other ASCII settings so it survives a renderer swap.
+        # CRT screen filter on top of the picture, with or without a display filter under
+        # it (GL renderer only; see CRT_LEVELS). Kept here with the other display settings
+        # so it survives a renderer swap. The three knobs scale the level's blur, phosphor
+        # trail and colour convergence error; 1.0 = exactly what the level asks for.
         self.crt_on = False
         self.crt_level = 1
+        self.crt_blur = 1.0
+        self.crt_trail = 1.0
+        self.crt_aberr = 1.0
+        self.crt_tint = 0      # index into CRT_TRAIL_TINTS; 0 = auto (the picture's own colours)
         self._pal_cache = {}
         self._pix_key = None
         self._pix_out = self._bayer_t = None
@@ -1446,9 +1586,14 @@ class VideoWidgetBase:
         """Whether this widget can draw the CRT screen filter (needs the GL shaders)."""
         return False
 
+    def video_color_supported(self):
+        """Whether the colour modes also work on plain video (needs the GL shaders)."""
+        return False
+
     @property
     def crt_active(self):
-        return self.ascii_active and self.ascii.crt_on and self.crt_supported()
+        """The CRT screen shows over the display filters and over plain video alike."""
+        return self.ascii.crt_on and self.crt_supported()
 
     def flash(self, text, secs=2.0):
         self._osd_text = text
@@ -1748,8 +1893,9 @@ if HAVE_GL:
         into a tiny off-screen framebuffer, one pixel per character cell, and a fragment
         shader (ASCII_FRAG) turns that into glyphs per screen pixel - so a 5120x1440
         fullscreen ASCII picture costs the GPU about as much as drawing a texture. With the
-        CRT screen filter on, that picture goes through three more small passes
-        (afterglow, bloom blur, tube composition - see _draw_crt) before reaching the screen.
+        CRT screen filter on, the picture - filtered or not - goes through a few more small
+        passes (afterglow, focus blur, bloom, tube composition - see _draw_crt) before
+        reaching the screen.
 
         Overlays (subtitles, OSD, idle screen) are still drawn with QPainter on top; Qt
         resets the GL state it needs when the painter begins."""
@@ -1774,6 +1920,9 @@ if HAVE_GL:
             self._progs = {}
             self._filters_ok = False
             self._edge_fbo = None
+            # colour modes on plain video (VIDEO_COLOR_FRAG): mpv renders in here first
+            self._video_fbo = None
+            self._video_size = None
             self._cpu_smooth = True
             self._keepaspect = None
             self._ready = False
@@ -1785,6 +1934,9 @@ if HAVE_GL:
             self._scene_fbo = None
             self._persist = [None, None]
             self._persist_ix = 0
+            self._persist_stale = True   # nothing usable in the persistence buffers yet
+            self._focus = [None, None]
+            self._focus_half = [None, None]
             self._bloom = [None, None]
             self._crt_size = None
             self._crt_last_t = None
@@ -1825,6 +1977,9 @@ if HAVE_GL:
         def crt_supported(self):
             return self._shader_ok and self._crt_ok
 
+        def video_color_supported(self):
+            return self._shader_ok and self._filters_ok
+
         def release_gl(self):
             """Free mpv's render context and our GL objects while the context still exists."""
             if self._released:
@@ -1845,9 +2000,13 @@ if HAVE_GL:
                 self._vao = None
                 self._progs = {}
                 self._edge_fbo = None
+                self._video_fbo = None
+                self._video_size = None
                 self._crt_progs = {}
                 self._scene_fbo = None
                 self._persist = [None, None]
+                self._focus = [None, None]
+                self._focus_half = [None, None]
                 self._bloom = [None, None]
                 self._crt_size = None
                 self.engine.free_render_ctx()
@@ -1942,12 +2101,17 @@ if HAVE_GL:
                     "u_grid", "u_mode", "u_phosphor", "u_pal_off", "u_pal_n", "u_lo", "u_hi"), (("u_frame", 0),)),
                 "vector": self._compile(VECTOR_FRAG, ("u_origin", "u_cell", "u_grid", "u_fbh", "u_glow"),
                                         (("u_edge", 0),)),
+                "video": self._compile(GLSL_COMMON + VIDEO_COLOR_FRAG, (
+                    "u_res", "u_mode", "u_phosphor", "u_pal_off", "u_pal_n", "u_spread", "u_dither_px"),
+                    (("u_frame", 0),)),
             }
 
         def _build_crt_shaders(self):
             self._crt_progs = {
-                "persist": self._compile(CRT_PERSIST_FRAG, ("u_res", "u_decay", "u_floor", "u_dtn"),
+                "persist": self._compile(CRT_PERSIST_FRAG, ("u_res", "u_decay", "u_floor", "u_dtn",
+                                                            "u_tint", "u_tint_mix"),
                                          (("u_cur", 0), ("u_prev", 1))),
+                "focus": self._compile(CRT_FOCUS_FRAG, ("u_res", "u_dir", "u_sigma"), (("u_src", 0),)),
                 "blur": self._compile(CRT_BLUR_FRAG, ("u_res", "u_dir", "u_prep"), (("u_src", 0),)),
                 "crt": self._compile(CRT_FRAG, (
                     "u_res", "u_rect", "u_curve", "u_corner", "u_mask", "u_mask_px", "u_scan", "u_scan_period",
@@ -1971,15 +2135,36 @@ if HAVE_GL:
             gl.Clear(GL_COLOR_BUFFER_BIT)
             return f
 
+        def _color_params(self):
+            """The colour mode as the shaders want it: (mode id, tube colour, palette slice).
+            Mode ids are 0 colour, 1 raw, 2 phosphor, 3 palette - the same in every shader."""
+            mode = self.ascii.color_mode
+            if mode in PALETTES:
+                return 3, (0.0, 0.0, 0.0), PAL_OFFSETS[mode], len(PALETTES[mode][1])
+            if mode in PHOSPHOR:
+                b, g, r = PHOSPHOR[mode]
+                return 2, (r / 255.0, g / 255.0, b / 255.0), 0, 0
+            return (1 if mode == "raw" else 0), (0.0, 0.0, 0.0), 0, 0
+
+        def _ensure_video_fbo(self, gl, fw, fh):
+            """The buffer mpv draws into when a colour pass has to run over its picture."""
+            if self._video_size != (fw, fh) or self._video_fbo is None:
+                self._video_fbo = self._make_fbo(gl, fw, fh)
+                self._video_size = (fw, fh)
+            return self._video_fbo
+
         def _ensure_crt_fbos(self, gl, fw, fh):
             if self._crt_size == (fw, fh) and self._scene_fbo is not None:
                 return
             self._scene_fbo = self._make_fbo(gl, fw, fh)
             self._persist = [self._make_fbo(gl, fw, fh), self._make_fbo(gl, fw, fh)]
+            self._focus = [self._make_fbo(gl, fw, fh), self._make_fbo(gl, fw, fh)]
             bw, bh = max(1, (fw + 1) // 2), max(1, (fh + 1) // 2)
+            self._focus_half = [self._make_fbo(gl, bw, bh), self._make_fbo(gl, bw, bh)]
             self._bloom = [self._make_fbo(gl, bw, bh), self._make_fbo(gl, bw, bh)]
             self._crt_size = (fw, fh)
             self._crt_last_t = None
+            self._persist_stale = True
 
         def _run_pass(self, gl, target, w, h, textures):
             """Draw the full-screen triangle with the bound program into framebuffer `target`,
@@ -2047,13 +2232,7 @@ if HAVE_GL:
                 if self.has_media and self.ascii_active:
                     cpu_image = self._draw_ascii(gl, fbo, fw, fh, dpr, W, H)
                 elif self.has_media:
-                    self._set_keepaspect(True)
-                    self._clear(gl, fbo, fw, fh)
-                    self.engine.render_gl(fbo, fw, fh, flip_y=True)
-                    gl.BindFramebuffer(GL_FRAMEBUFFER, fbo)
-                    # mpv letterboxes into the whole framebuffer; this is where the picture lands
-                    pw, ph = fit_rect(self.engine.display_aspect(), fw, fh)
-                    self._picture_rect = QRect((fw - pw) // 2, (fh - ph) // 2, pw, ph)
+                    self._draw_video(gl, fbo, fw, fh, dpr)
                 else:
                     gl.BindFramebuffer(GL_FRAMEBUFFER, fbo)
                     gl.Viewport(0, 0, fw, fh)
@@ -2085,6 +2264,52 @@ if HAVE_GL:
             gl.Viewport(0, 0, w, h)
             gl.ClearColor(0.0, 0.0, 0.0, 1.0)
             gl.Clear(GL_COLOR_BUFFER_BIT)
+
+        def _draw_video(self, gl, fbo, fw, fh, dpr):
+            """Plain video, no display filter: mpv draws straight into the widget - or, when
+            a colour mode or the CRT screen is on, into an off-screen buffer that the colour
+            pass and the CRT passes then take to the screen (so an ordinary film can be
+            watched as a green-phosphor tube, or simply as if it were on a TV set)."""
+            self._set_keepaspect(True)
+            crt = self.crt_active
+            mode_id, phosphor, pal_off, pal_n = self._color_params()
+            tint = mode_id != 0 and self.video_color_supported()
+            if crt:
+                self._ensure_crt_fbos(gl, fw, fh)
+                out = self._scene_fbo.handle()   # the CRT passes take it from here to the screen
+            else:
+                out = fbo
+            # with a colour pass to run, mpv draws into its own buffer and that pass writes `out`
+            target = self._ensure_video_fbo(gl, fw, fh).handle() if tint else out
+            self._clear(gl, target, fw, fh)
+            self.engine.render_gl(target, fw, fh, flip_y=True)
+            gl.BindFramebuffer(GL_FRAMEBUFFER, target)
+            # mpv letterboxes into the whole framebuffer; this is where the picture lands
+            pw, ph = fit_rect(self.engine.display_aspect(), fw, fh)
+            ox, oy = (fw - pw) // 2, (fh - ph) // 2
+            self._picture_rect = QRect(ox, oy, pw, ph)
+            if not (tint or crt):
+                return
+            # mpv leaves its own GL state behind; our passes need it as the quad wants it
+            for cap in (GL_BLEND, GL_SCISSOR_TEST, GL_DEPTH_TEST, GL_CULL_FACE):
+                gl.Disable(cap)
+            if tint:
+                spread = PALETTES[self.ascii.color_mode][0] if mode_id == 3 else 0.0
+                prog, u = self._progs["video"]
+                prog.bind()
+                prog.setUniformValue(u["u_res"], QVector2D(float(fw), float(fh)))
+                prog.setUniformValue(u["u_mode"], mode_id)
+                prog.setUniformValue(u["u_phosphor"], QVector3D(*phosphor))
+                prog.setUniformValue(u["u_pal_off"], pal_off)
+                prog.setUniformValue(u["u_pal_n"], pal_n)
+                prog.setUniformValue(u["u_spread"], float(spread))
+                prog.setUniformValue(u["u_dither_px"], float(max(1, round(dpr))))
+                self._run_pass(gl, out, fw, fh, (self._video_fbo.texture(),))
+                prog.release()
+                gl.ActiveTexture(GL_TEXTURE0)
+                gl.BindTexture(GL_TEXTURE_2D, 0)
+            if crt:
+                self._draw_crt(gl, fbo, fw, fh, (ox, fh - oy - ph, pw, ph), 0.0, dpr, kind="video")
 
         def _draw_ascii(self, gl, fbo, fw, fh, dpr, W, H):
             """Draw the active display filter (ASCII, Bayer or vector). Returns a QImage to
@@ -2141,17 +2366,7 @@ if HAVE_GL:
             for cap in (GL_BLEND, GL_SCISSOR_TEST, GL_DEPTH_TEST, GL_CULL_FACE):
                 gl.Disable(cap)
             mode = self.ascii.color_mode
-            pal_off, pal_n = 0, 0
-            if mode == "color":
-                mode_id, phosphor = 0, (0.0, 0.0, 0.0)
-            elif mode == "raw":
-                mode_id, phosphor = 1, (0.0, 0.0, 0.0)
-            elif mode in PALETTES:
-                mode_id, phosphor = 3, (0.0, 0.0, 0.0)
-                pal_off, pal_n = PAL_OFFSETS[mode], len(PALETTES[mode][1])
-            else:
-                b, g, r = PHOSPHOR[mode]
-                mode_id, phosphor = 2, (r / 255.0, g / 255.0, b / 255.0)
+            mode_id, phosphor, pal_off, pal_n = self._color_params()
             common = dict(origin=QVector2D(ox, oy), cell=QVector2D(cell_x, cell_y), grid=QVector2D(float(vc), float(vr)),
                           fbh=float(fh), mode=mode_id, phosphor=QVector3D(*phosphor), pal_off=pal_off, pal_n=pal_n)
             if kind == "ascii":
@@ -2246,31 +2461,66 @@ if HAVE_GL:
             prog.release()
 
         def _draw_crt(self, gl, fbo, fw, fh, rect, cell_y, dpr, kind="ascii"):
-            """The CRT screen filter: afterglow, bloom and tube composition on top of the
-            filtered picture sitting in self._scene_fbo. `rect` is the picture in framebuffer
+            """The CRT screen filter: afterglow, focus blur, bloom and tube composition on
+            top of the picture sitting in self._scene_fbo. `rect` is the picture in framebuffer
             px with a bottom-left origin (GL convention), `cell_y` a character row's (or grid
-            pixel's) height in px, `kind` the display filter that drew the picture: a vector
-            monitor has no shadow mask and no scanlines - just the beam on the phosphor, which
-            lingers longer - so those are left out for `vector`."""
+            pixel's) height in px (0 for plain video, which has no cells), `kind` what drew the
+            picture: a vector monitor has no shadow mask and no scanlines - just the beam on
+            the phosphor, which lingers longer - so those are left out for `vector`."""
             lvl = CRT_LEVELS[self.ascii.crt_level][1]
             vector = kind == "vector"
-            tau_scale = 1.8 if vector else 1.0
+            tau_scale = (1.8 if vector else 1.0) * max(0.0, self.ascii.crt_trail)
             now = time.monotonic()
             dt = 0.0 if self._crt_last_t is None else min(0.1, max(0.0, now - self._crt_last_t))
             self._crt_last_t = now
             self._crt_seed = (self._crt_seed + 1) & 0xFFFF
-            # 1. phosphor persistence: ping-pong between the two buffers
-            prev, cur = self._persist[self._persist_ix], self._persist[1 - self._persist_ix]
-            self._persist_ix = 1 - self._persist_ix
-            prog, u = self._crt_progs["persist"]
-            prog.bind()
-            prog.setUniformValue(u["u_res"], QVector2D(float(fw), float(fh)))
-            prog.setUniformValue(u["u_decay"], QVector3D(*(math.exp(-dt / (t * tau_scale)) for t in lvl["tau"])))
-            prog.setUniformValue(u["u_floor"], float(dt * 0.5))
-            prog.setUniformValue(u["u_dtn"], float(dt * 60.0))
-            self._run_pass(gl, cur.handle(), fw, fh, (self._scene_fbo.texture(), prev.texture()))
-            prog.release()
-            # 2. bloom: highlight-weighted half-size copy, blurred horizontally then vertically.
+            # 1. phosphor persistence: ping-pong between the two buffers. With the trail knob
+            # at zero the phosphor lets go instantly and the pass is skipped altogether.
+            if tau_scale > 0.005:
+                prev, cur = self._persist[self._persist_ix], self._persist[1 - self._persist_ix]
+                self._persist_ix = 1 - self._persist_ix
+                if self._persist_stale:
+                    # coming back from trail 0: whatever is in there is old, don't smear it in
+                    self._clear(gl, prev.handle(), fw, fh)
+                    self._persist_stale = False
+                prog, u = self._crt_progs["persist"]
+                prog.bind()
+                prog.setUniformValue(u["u_res"], QVector2D(float(fw), float(fh)))
+                prog.setUniformValue(u["u_decay"], QVector3D(*(math.exp(-dt / (t * tau_scale)) for t in lvl["tau"])))
+                prog.setUniformValue(u["u_floor"], float(dt * 0.5))
+                prog.setUniformValue(u["u_dtn"], float(dt * 60.0))
+                rgb = CRT_TRAIL_TINTS[self.ascii.crt_tint][1]
+                prog.setUniformValue(u["u_tint"], QVector3D(*[v / 255.0 for v in rgb or (0, 0, 0)]))
+                prog.setUniformValue(u["u_tint_mix"], 0.0 if rgb is None else 1.0)
+                self._run_pass(gl, cur.handle(), fw, fh, (self._scene_fbo.texture(), prev.texture()))
+                prog.release()
+                lit = cur.texture()
+            else:
+                self._persist_stale = True
+                lit = self._scene_fbo.texture()
+            # 2. focus blur: the beam's spot, wider across than down. Two passes (horizontal
+            # then vertical), and none at all when the knob is at zero (a perfectly focused,
+            # i.e. digital, picture). A wide spot goes to the half-size buffers instead -
+            # the first pass then doubles as the downsample, and the result is upscaled
+            # again by the linear filter when the tube pass reads it.
+            sigma = max(0.0, self.ascii.crt_blur) * lvl["blur"] * dpr
+            if sigma > 0.02:
+                half = sigma > CRT_BLUR_HALF_PX * dpr
+                buf = self._focus_half if half else self._focus
+                tw, th = buf[0].width(), buf[0].height()
+                s_px = sigma * 0.5 if half else sigma
+                prog, u = self._crt_progs["focus"]
+                prog.bind()
+                prog.setUniformValue(u["u_res"], QVector2D(float(tw), float(th)))
+                prog.setUniformValue(u["u_dir"], QVector2D(1.0 / tw, 0.0))
+                prog.setUniformValue(u["u_sigma"], float(s_px))
+                self._run_pass(gl, buf[0].handle(), tw, th, (lit,))
+                prog.setUniformValue(u["u_dir"], QVector2D(0.0, 1.0 / th))
+                prog.setUniformValue(u["u_sigma"], float(s_px * CRT_BLUR_ASPECT))
+                self._run_pass(gl, buf[1].handle(), tw, th, (buf[0].texture(),))
+                prog.release()
+                lit = buf[1].texture()
+            # 3. bloom: highlight-weighted half-size copy, blurred horizontally then vertically.
             # Taps two px apart with linear filtering so every source pixel is seen once.
             bw, bh = self._bloom[0].width(), self._bloom[0].height()
             prog, u = self._crt_progs["blur"]
@@ -2278,16 +2528,20 @@ if HAVE_GL:
             prog.setUniformValue(u["u_res"], QVector2D(float(bw), float(bh)))
             prog.setUniformValue(u["u_dir"], QVector2D(2.0 * dpr / fw, 0.0))
             prog.setUniformValue(u["u_prep"], 1)
-            self._run_pass(gl, self._bloom[0].handle(), bw, bh, (cur.texture(),))
+            self._run_pass(gl, self._bloom[0].handle(), bw, bh, (lit,))
             prog.setUniformValue(u["u_dir"], QVector2D(0.0, dpr / bh))
             prog.setUniformValue(u["u_prep"], 0)
             self._run_pass(gl, self._bloom[1].handle(), bw, bh, (self._bloom[0].texture(),))
             prog.release()
-            # 3. the tube itself, onto the screen. Scanlines: a whole number per character
+            # 4. the tube itself, onto the screen. Scanlines: a whole number per character
             # row; on the pixel grids of the Bayer filter a whole number of grid rows per
-            # scanline instead, so the lines never beat against the dither pattern.
+            # scanline instead, so the lines never beat against the dither pattern; on plain
+            # video a whole number of lines over the picture, like a real tube's raster.
             if kind == "ascii":
                 scan_period = cell_y / max(1, int(round(cell_y / (4.0 * dpr))))
+            elif kind == "video":
+                lines = max(1, min(CRT_VIDEO_LINES, int(rect[3] / (CRT_SCAN_MIN_PX * dpr))))
+                scan_period = rect[3] / lines
             else:
                 scan_period = cell_y * max(1, int(round(3.0 * dpr / cell_y)))
             prog, u = self._crt_progs["crt"]
@@ -2304,10 +2558,10 @@ if HAVE_GL:
             prog.setUniformValue(u["u_grain"], float(lvl["grain"]))
             prog.setUniformValue(u["u_hum"], float(lvl["hum"]))
             prog.setUniformValue(u["u_vignette"], float(lvl["vignette"]))
-            prog.setUniformValue(u["u_aberr"], float(lvl["aberr"] * dpr))
+            prog.setUniformValue(u["u_aberr"], float(lvl["aberr"] * max(0.0, self.ascii.crt_aberr) * dpr))
             prog.setUniformValue(u["u_time"], float((now - self._crt_t0) % 3600.0))
             prog.setUniformValue(u["u_seed"], int(self._crt_seed))
-            self._run_pass(gl, fbo, fw, fh, (cur.texture(), self._bloom[1].texture()))
+            self._run_pass(gl, fbo, fw, fh, (lit, self._bloom[1].texture()))
             prog.release()
             gl.ActiveTexture(GL_TEXTURE1)
             gl.BindTexture(GL_TEXTURE_2D, 0)
@@ -2426,6 +2680,131 @@ class ClickSeekSlider(QSlider):
         event.accept()
 
 
+class CrtDialog(QDialog):
+    """The CRT screen panel (Ctrl+G): the filter on/off, its intensity, and the three knobs
+    an intensity level only sets the starting point for - focus blur, phosphor trail (the
+    smudge behind moving things) and chromatic aberration. Modeless and always on top of
+    the player, so the picture behind it changes while the sliders move."""
+
+    TIPS = {
+        "crt_blur": "How sharply the electron beam is focused. Up: a soft, slightly out-of-focus tube.\n"
+                    "Down to zero: a perfectly sharp, digital picture.",
+        "crt_trail": "How long the phosphor keeps glowing after the beam has passed, so bright\n"
+                     "moving things smear behind themselves. Down to zero: no trail at all.",
+        "crt_aberr": "Colour convergence error: the red and blue guns landing slightly off the\n"
+                     "green one, a little everywhere and much more towards the edges.",
+    }
+
+    def __init__(self, win):
+        super().__init__(win, Qt.WindowType.Tool)
+        self.win = win
+        self.setWindowTitle("CRT screen")
+        self.setStyleSheet("QDialog { background: #101010; } QLabel { color: #d0d0d0; }")
+        col = QVBoxLayout(self)
+        col.setContentsMargins(14, 12, 14, 12)
+        col.setSpacing(10)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.on_btn = QToolButton()
+        self.on_btn.setText("CRT")
+        self.on_btn.setCheckable(True)
+        self.on_btn.setToolTip("CRT screen on/off (g)")
+        self.on_btn.clicked.connect(lambda: win.toggle_crt())
+        top.addWidget(self.on_btn)
+        top.addWidget(QLabel("intensity"))
+        self.level_combo = QComboBox()
+        for name in CRT_LEVEL_NAMES:
+            self.level_combo.addItem(name)
+        self.level_combo.setToolTip("How strong the whole CRT look is - and the starting point the three "
+                                    "knobs below scale (Shift+G)")
+        self.level_combo.currentIndexChanged.connect(win.set_crt_level)
+        top.addWidget(self.level_combo, 1)
+        col.addLayout(top)
+
+        self.rows = {}
+        for attr, label, _unit, key in CRT_KNOBS:
+            name = QLabel(label)
+            name.setMinimumWidth(78)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, int(round(CRT_KNOB_MAX / CRT_KNOB_STEP)))
+            slider.setPageStep(4)
+            slider.setFixedWidth(200)
+            slider.valueChanged.connect(lambda v, a=attr: self._slider_moved(a, v))
+            value = QLabel()
+            value.setMinimumWidth(120)
+            tip = f"{self.TIPS[attr]}\n\n{key} / {key.replace('Ctrl+', 'Ctrl+Shift+')} does the same from the video."
+            for w in (name, slider, value):
+                w.setToolTip(tip)
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            for w in (name, slider, value):
+                row.addWidget(w)
+            col.addLayout(row)
+            self.rows[attr] = (slider, value)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        name = QLabel("trail colour")
+        name.setMinimumWidth(78)
+        self.tint_combo = QComboBox()
+        for tname in CRT_TINT_NAMES:
+            self.tint_combo.addItem(tname)
+        self.tint_combo.currentIndexChanged.connect(win.set_crt_tint)
+        tip = ("What colour the trail glows as it fades. \"auto\" keeps whatever colour the picture\n"
+               "had - which in the green/amber/mono colour modes is already that phosphor - and the\n"
+               "rest force one, so a full-colour picture can still smear green.\n\n"
+               "Ctrl+Shift+G steps through them from the video.")
+        for w in (name, self.tint_combo):
+            w.setToolTip(tip)
+        row.addWidget(name)
+        row.addWidget(self.tint_combo, 1)
+        col.addLayout(row)
+
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        self.note.setStyleSheet("color: #8ce87a")
+        col.addWidget(self.note)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        reset = QPushButton("Reset")
+        reset.setToolTip("Blur, trail and aberration back to what the intensity level asks for (Ctrl+0)")
+        reset.clicked.connect(win.reset_crt_knobs)
+        buttons.addWidget(reset)
+        close = QPushButton("Close")
+        close.setDefault(True)
+        close.clicked.connect(self.hide)
+        buttons.addWidget(close)
+        col.addLayout(buttons)
+
+    def _slider_moved(self, attr, value):
+        self.win.set_crt_knob(attr, value * CRT_KNOB_STEP, flash=False)
+
+    def refresh(self):
+        """Pull the current state back out of the player (the keys change it too)."""
+        self.on_btn.blockSignals(True)
+        self.on_btn.setChecked(self.win.ascii.crt_on)
+        self.on_btn.blockSignals(False)
+        self.level_combo.blockSignals(True)
+        self.level_combo.setCurrentIndex(self.win.ascii.crt_level)
+        self.level_combo.blockSignals(False)
+        self.tint_combo.blockSignals(True)
+        self.tint_combo.setCurrentIndex(self.win.ascii.crt_tint)
+        self.tint_combo.blockSignals(False)
+        for attr, (slider, label) in self.rows.items():
+            slider.blockSignals(True)
+            slider.setValue(int(round(getattr(self.win.ascii, attr) / CRT_KNOB_STEP)))
+            slider.blockSignals(False)
+            label.setText(self.win.crt_knob_value_text(attr))
+        if not self.win.video.crt_supported():
+            self.note.setText("The CRT screen needs the OpenGL renderer, which is not available in this session.")
+        elif not self.win.ascii.crt_on:
+            self.note.setText("The CRT screen is off - turn it on to see any of this.")
+        else:
+            self.note.setText("Shown over the display filter, or straight over the video for a TV look.")
+
+
 # --------------------------------------------------------------------------------------
 # Main window
 # --------------------------------------------------------------------------------------
@@ -2455,6 +2834,21 @@ class MainWindow(QMainWindow):
         self.video.fps_log = bool(args.fps)
         self.ascii.crt_on = bool(args.crt)
         self.ascii.crt_level = CRT_LEVEL_NAMES.index(args.crt_level)
+        for attr, value in (("crt_blur", args.crt_blur), ("crt_trail", args.crt_trail),
+                            ("crt_aberr", args.crt_aberr)):
+            setattr(self.ascii, attr, min(CRT_KNOB_MAX, max(0.0, value)))
+        tint = args.crt_trail_color.lower()
+        if tint not in CRT_TINT_NAMES:
+            raise RuntimeError(f"--crt-trail-color: unknown colour {args.crt_trail_color!r} "
+                               f"(pick one of {', '.join(CRT_TINT_NAMES)})")
+        self.ascii.crt_tint = CRT_TINT_NAMES.index(tint)
+        if args.color is not None:
+            mode = args.color.lower()
+            if mode not in COLOR_MODES:
+                raise RuntimeError(f"--color: unknown mode {args.color!r} "
+                                   f"(pick one of {', '.join(COLOR_MODES)})")
+            self.ascii.color_mode = mode
+        self.crt_dialog = None
 
         self.audio_mode = False       # current file has no real video -> visualiser
         self._ytdl_hint_until = 0.0   # while set, keep YTDL_BOT_HINT on screen (see _on_log)
@@ -2679,8 +3073,10 @@ class MainWindow(QMainWindow):
         self.crt_btn = QToolButton()
         self.crt_btn.setText("CRT")
         self.crt_btn.setCheckable(True)
-        self.crt_btn.setToolTip("CRT screen on top of the ASCII art: curved glass, shadow mask, scanlines, "
-                                "bloom, grain, afterglow (g; Shift+G for the intensity)")
+        self.crt_btn.setToolTip("CRT screen over the picture - with a display filter under it or on plain "
+                                "video, for a TV look: curved glass, shadow mask, scanlines, focus blur, "
+                                "bloom, grain, phosphor trail (g; Shift+G for the intensity, Ctrl+G for the "
+                                "blur / trail / aberration knobs)")
         self.crt_btn.clicked.connect(self.toggle_crt)
         lay.addWidget(self.crt_btn)
 
@@ -2865,9 +3261,10 @@ class MainWindow(QMainWindow):
         self._act(m, "Smaller characters / pixels", ["Ctrl+-", "Ctrl+_"], lambda: self.change_font_px(-1))
         self._act(m, "Bigger characters / pixels", ["Ctrl+=", "Ctrl++"], lambda: self.change_font_px(1))
         m.addSeparator()
-        self.crt_action = self._act(m, "CRT screen (on top of the display filter)", "G", self.toggle_crt,
-                                    checkable=True)
+        self.crt_action = self._act(m, "CRT screen (over the display filter, or over plain video)", "G",
+                                    self.toggle_crt, checkable=True)
         self._act(m, "Next CRT intensity", "Shift+G", self.next_crt_level)
+        self._act(m, "CRT screen settings…", "Ctrl+G", self.show_crt_dialog)
         m.addSeparator()
         self.crop_menu = m.addMenu("Crop / aspect ratio")
         for i, (label, _) in enumerate(CROP_RATIOS):
@@ -2886,9 +3283,21 @@ class MainWindow(QMainWindow):
         self.res_menu = m.addMenu("Resolution")
         for label, divider in RES_DIVIDERS:
             self._act(self.res_menu, label, None, lambda _=False, dv=divider: self.set_res_divider(dv))
-        self.crt_menu = m.addMenu("CRT intensity")
+        self.crt_menu = m.addMenu("CRT screen")
         for i, name in enumerate(CRT_LEVEL_NAMES):
             self._act(self.crt_menu, name, None, lambda _=False, ix=i: self.set_crt_level(ix))
+        # the three live knobs (see CRT_KNOBS); their shortcuts work everywhere, dialog included
+        self.crt_menu.addSeparator()
+        for attr, label, _unit, key in CRT_KNOBS:
+            self._act(self.crt_menu, f"More CRT {label}", key, lambda _=False, a=attr: self.change_crt_knob(a, 1))
+            self._act(self.crt_menu, f"Less CRT {label}", key.replace("Ctrl+", "Ctrl+Shift+"),
+                      lambda _=False, a=attr: self.change_crt_knob(a, -1))
+        self._act(self.crt_menu, "Reset CRT blur / trail / aberration", "Ctrl+0", self.reset_crt_knobs)
+        self.crt_menu.addSeparator()
+        self._act(self.crt_menu, "Next CRT trail colour", "Ctrl+Shift+G", self.next_crt_tint)
+        tint_menu = self.crt_menu.addMenu("Trail colour")
+        for i, name in enumerate(CRT_TINT_NAMES):
+            self._act(tint_menu, name, None, lambda _=False, ix=i: self.set_crt_tint(ix))
         self.viz_menu = m.addMenu("Audio visualiser")
         for i, (name, _) in enumerate(VISUALIZERS):
             self._act(self.viz_menu, name, None, lambda _=False, ix=i: self.set_visualizer(ix))
@@ -3518,9 +3927,14 @@ class MainWindow(QMainWindow):
             self.set_filter(self.filter_combo.itemData(idx))
 
     def set_color_mode(self, mode):
+        """The colour modes apply to the display filters and, with none of them on, to the
+        video itself (green/amber/mono phosphor, greyscale, or one of the palettes)."""
         self.ascii.color_mode = mode
         self.video.render_now()
-        self.video.flash(f"colour mode: {COLOR_MODE_LABELS.get(mode, mode)}")
+        msg = f"colour mode: {COLOR_MODE_LABELS.get(mode, mode)}"
+        if not self.video.ascii_active and mode != "color" and not self.video.video_color_supported():
+            msg += "   (on plain video it needs the OpenGL renderer)"
+        self.video.flash(msg)
 
     def next_color_mode(self):
         i = COLOR_MODES.index(self.ascii.color_mode)
@@ -3533,6 +3947,8 @@ class MainWindow(QMainWindow):
             w.blockSignals(True)
             w.setChecked(on)
             w.blockSignals(False)
+        if self.crt_dialog is not None:
+            self.crt_dialog.refresh()
         self.video.render_now()
         if not flash and not (on and not self.use_gl):
             return   # (but do say so when --crt was asked for and there is no GL to draw it with)
@@ -3540,8 +3956,6 @@ class MainWindow(QMainWindow):
             msg = "CRT screen needs the OpenGL renderer (unavailable here)"
         elif on:
             msg = f"CRT screen: on ({CRT_LEVEL_NAMES[self.ascii.crt_level]})"
-            if not self.video.ascii_active:
-                msg += "  - shows once a display filter is on (t)"
         else:
             msg = "CRT screen: off"
         self.video.flash(msg)
@@ -3558,6 +3972,64 @@ class MainWindow(QMainWindow):
     def next_crt_level(self):
         # off -> on at the current intensity; on -> the next one
         self.set_crt_level(self.ascii.crt_level + 1 if self.ascii.crt_on else self.ascii.crt_level)
+
+    def crt_knob_value_text(self, attr):
+        """One knob's value: the factor, then what it comes to on the current intensity level
+        (blur and aberration in pixels, the trail in seconds - the green phosphor's decay
+        time, which is the longest of the three)."""
+        unit = next(un for at, _lb, un, _k in CRT_KNOBS if at == attr)
+        factor = getattr(self.ascii, attr)
+        lvl = CRT_LEVELS[self.ascii.crt_level][1]
+        base = lvl["tau"][1] if attr == "crt_trail" else lvl["blur" if attr == "crt_blur" else "aberr"]
+        return f"×{factor:.2f}" + (f"  ({base * factor:.2f} {unit})" if factor > 0 else "  (off)")
+
+    def crt_knob_text(self, attr):
+        """The same with the knob's name in front, for the OSD."""
+        label = next(lb for at, lb, _un, _k in CRT_KNOBS if at == attr)
+        return f"CRT {label}: {self.crt_knob_value_text(attr)}"
+
+    def set_crt_knob(self, attr, value, flash=True):
+        setattr(self.ascii, attr, min(CRT_KNOB_MAX, max(0.0, round(value / CRT_KNOB_STEP) * CRT_KNOB_STEP)))
+        if self.crt_dialog is not None:
+            self.crt_dialog.refresh()
+        self.video.render_now()
+        if flash:
+            self.video.flash(self.crt_knob_text(attr)
+                             + ("" if self.ascii.crt_on else "   (CRT screen is off - g turns it on)"))
+
+    def change_crt_knob(self, attr, d):
+        self.set_crt_knob(attr, getattr(self.ascii, attr) + d * CRT_KNOB_STEP)
+
+    def reset_crt_knobs(self):
+        for attr, _, _, _ in CRT_KNOBS:
+            setattr(self.ascii, attr, 1.0)
+        if self.crt_dialog is not None:
+            self.crt_dialog.refresh()
+        self.video.render_now()
+        self.video.flash("CRT blur, trail and aberration back to the intensity level's defaults")
+
+    def set_crt_tint(self, index, flash=True):
+        """Which colour the phosphor trail glows as it fades (see CRT_TRAIL_TINTS)."""
+        self.ascii.crt_tint = index % len(CRT_TRAIL_TINTS)
+        if self.crt_dialog is not None:
+            self.crt_dialog.refresh()
+        self.video.render_now()
+        if flash:
+            name = CRT_TINT_NAMES[self.ascii.crt_tint]
+            self.video.flash(f"CRT trail colour: {name}"
+                             + ("  (whatever colour the picture has)" if name == "auto" else ""))
+
+    def next_crt_tint(self):
+        self.set_crt_tint(self.ascii.crt_tint + 1)
+
+    def show_crt_dialog(self):
+        """The CRT screen panel: on/off, intensity and the three knobs, live while playing."""
+        if self.crt_dialog is None:
+            self.crt_dialog = CrtDialog(self)
+        self.crt_dialog.refresh()
+        self.crt_dialog.show()
+        self.crt_dialog.raise_()
+        self.crt_dialog.activateWindow()
 
     # ------------------------------------------------------------------ crop / aspect
     def _apply_crop(self, flash=True):
@@ -3808,15 +4280,17 @@ class MainWindow(QMainWindow):
         <h2 style="margin-bottom:2px">asciiplay <span style="font-weight:normal;color:#8ce87a">{VERSION}</span></h2>
         <p>A native video and audio player with a terminal soul: anything it plays can be
         turned into live, coloured ASCII art, 1-bit Bayer-dithered pixels or the glowing
-        edge traces of a vector display, and that picture can be put behind the glass of a
+        edge traces of a vector display, and that picture - or the plain video, run through
+        the same phosphor and retro-palette colour modes - can be put behind the glass of a
         simulated CRT monitor.</p>
         <p>What makes it different from the many terminal ASCII players: the text rendering
         is a fragment shader running inside a real desktop window, so a 5120x1440 fullscreen
         picture keeps the video's frame rate with hardware decoding staying on the GPU; the
         character ramps are sorted by the measured ink of your actual font so gradients do not
-        band; the CRT look (curved glass, shadow mask, scanlines, bloom, grain, phosphor
-        afterglow) is a second shader chain on top; and audio files run through the same
-        path as five ffmpeg visualisers. Around that sits an ordinary player: tracks,
+        band; the CRT look (curved glass, shadow mask, scanlines, beam focus blur, bloom,
+        grain, chromatic aberration, phosphor trail) is a second shader chain on top, with
+        the blur, the trail, its colour and the aberration on live sliders (Ctrl+G); and
+        audio files run through the same path as five ffmpeg visualisers. Around that sits an ordinary player: tracks,
         subtitles, crop presets, speed, frame stepping, screenshots, text export, playlist
         with repeat and shuffle.</p>
         <p style="color:#a0a0a0">Built on {mpv_ver} (decoding, tracks, filters), PyQt6 {QT_VERSION_STR}
