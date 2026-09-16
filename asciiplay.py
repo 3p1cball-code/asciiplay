@@ -31,7 +31,7 @@ import threading
 import time
 
 APP_NAME = "asciiplay"
-VERSION = "1.3"
+VERSION = "1.35"
 HOMEPAGE = "https://github.com/3p1cball-code/asciiplay"
 
 # --------------------------------------------------------------------------------------
