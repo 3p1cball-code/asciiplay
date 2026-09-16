@@ -264,6 +264,14 @@ try:
     HAVE_GL = True
 except ImportError:  # pragma: no cover
     HAVE_GL = False
+try:
+    # Used to keep the screen awake while playing (see SleepInhibitor); without it the
+    # player still works, the desktop just may dim/sleep mid-movie.
+    from PyQt6.QtCore import QMetaType  # noqa: E402
+    from PyQt6.QtDBus import QDBusArgument, QDBusConnection, QDBusInterface, QDBusMessage  # noqa: E402
+    HAVE_DBUS = True
+except ImportError:  # pragma: no cover
+    HAVE_DBUS = False
 
 # Where each browser yt-dlp can read cookies from keeps its profile, so the hint below can
 # name one the user actually has rather than a guess.
@@ -924,6 +932,50 @@ def fit_rect(aspect, width, height):
         h = height
         w = int(round(h * aspect))
     return max(1, w), max(1, h)
+
+
+# --------------------------------------------------------------------------------------
+# Screen / sleep inhibition
+# --------------------------------------------------------------------------------------
+
+class SleepInhibitor:
+    """Asks the desktop not to dim or blank the screen, lock, or suspend/hibernate while
+    held. mpv's own --stop-screensaver can't do this for us: with vo=libmpv it has no
+    window of its own to attach the request to.
+
+    Uses the two freedesktop session-bus interfaces KDE (and most other desktops) serve:
+    org.freedesktop.ScreenSaver covers dimming/screen-off/lock, and
+    org.freedesktop.PowerManagement.Inhibit covers automatic suspend/hibernate. Both hand
+    out a cookie per request and drop it by themselves when our bus connection goes away,
+    so a crash can't leave the machine stuck awake. A missing service is skipped quietly."""
+
+    SERVICES = (("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver"),
+                ("org.freedesktop.PowerManagement.Inhibit", "/org/freedesktop/PowerManagement/Inhibit"))
+
+    def __init__(self, app_name, reason):
+        self.app_name = app_name
+        self.reason = reason
+        self.active = False
+        self._cookies = {}    # service name -> cookie from its Inhibit call
+
+    def _iface(self, service, path):
+        iface = QDBusInterface(service, path, service, QDBusConnection.sessionBus())
+        iface.setTimeout(1000)   # these are called from the GUI thread; never hang it for long
+        return iface
+
+    def set_active(self, on):
+        if on == self.active or not HAVE_DBUS:
+            return
+        self.active = on
+        for service, path in self.SERVICES:
+            if on:
+                reply = self._iface(service, path).call("Inhibit", self.app_name, self.reason)
+                if reply.type() == QDBusMessage.MessageType.ReplyMessage and reply.arguments():
+                    self._cookies[service] = reply.arguments()[0]
+            elif service in self._cookies:
+                # the signature is (u); a bare Python int would go out as (i) and be refused
+                cookie = QDBusArgument(self._cookies.pop(service), QMetaType.Type.UInt.value)
+                self._iface(service, path).call("UnInhibit", cookie)
 
 
 # --------------------------------------------------------------------------------------
@@ -2867,6 +2919,13 @@ class MainWindow(QMainWindow):
         self._fs_timer = QTimer(self)
         self._fs_timer.setSingleShot(True)
         self._fs_timer.timeout.connect(self._hide_fs_ui)
+        # Keep the screen awake while playing, as long as we are the window being watched.
+        # Polled rather than wired into every state change: idle timeouts are minutes long,
+        # so a second's lag does not matter, and nothing can be missed this way.
+        self.inhibitor = SleepInhibitor(APP_NAME, "Playing media")
+        self._inhibit_timer = QTimer(self)
+        self._inhibit_timer.timeout.connect(self._update_inhibit)
+        self._inhibit_timer.start(1000)
         # When True (default), the seek bar fades in and stays up throughout fullscreen.
         # When False, it hides and reappears together with the rest of the controls instead.
         self.keep_seekbar_fullscreen = True
@@ -4182,6 +4241,14 @@ class MainWindow(QMainWindow):
         self.video.flash("ASCII frame copied to clipboard")
 
     # ------------------------------------------------------------------ view
+    def _update_inhibit(self):
+        playing = (self.video.has_media and not self.engine.prop("pause", True)
+                   and not self.engine.prop("eof-reached", False))
+        # "watched" = fullscreen, or one of our windows (main window, dialogs, a floated
+        # playlist) has focus. Playing in a background window lets the desktop sleep as usual.
+        watched = self.isFullScreen() or (QApplication.activeWindow() is not None and not self.isMinimized())
+        self.inhibitor.set_active(playing and watched)
+
     def toggle_fullscreen(self):
         if self.isFullScreen():
             self.leave_fullscreen()
@@ -4326,6 +4393,8 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def closeEvent(self, event):
+        self._inhibit_timer.stop()
+        self.inhibitor.set_active(False)
         self.video.release_gl()   # mpv's GL render context must go while the GL context is alive
         self.engine.shutdown()
         super().closeEvent(event)

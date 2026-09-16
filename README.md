@@ -175,6 +175,13 @@ export and the software fallback.
 - **Audio files always show an ASCII visualiser** (waveform / spectrum / frequency bars /
   CQT bars / oscilloscope), driven by ffmpeg's `showcqt`/`showwaves`/... filters through
   mpv's `lavfi-complex`, then run through the same ASCII renderer.
+- **Keeps the screen awake while you watch** — while something is playing *and* the
+  player is fullscreen or the focused window, it asks the desktop (over D-Bus,
+  `org.freedesktop.ScreenSaver` + `org.freedesktop.PowerManagement.Inhibit`) not to dim
+  or turn off the screen, lock, or suspend/hibernate. Pause, stop, switch to another
+  window or quit and the request is dropped within a second; it also dies with the
+  process, so a crash can't keep the machine awake. On KDE the request shows up in the
+  battery/power applet as "asciiplay: Playing media".
 - **Dependency self-check**: on start (or with `--check`) it looks for PyQt6, numpy,
   libmpv and python-mpv and, if anything is missing, prints the exact `sudo` command to
   install it for your distro (Nobara/Fedora, Debian/Ubuntu, Arch, openSUSE) instead of
